@@ -2,9 +2,11 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer, AreaChart, Area, XAxis, Tooltip } from 'recharts';
 import { supabase } from './lib/supabase';
-import { Activity, Cpu, Database, GitBranch, Zap, Brain, Layers, Sparkles, Radio, Terminal } from 'lucide-react';
+import { Activity, Cpu, Database, GitBranch, Zap, Brain, Layers, Sparkles, Radio, Terminal, ShoppingBag, MessageSquare } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import TheForge from './TheForge';
+import Marketplace from './Marketplace';
+import ChatPanel from './ChatPanel';
 
 // ═══════════════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -18,6 +20,8 @@ const DIMENSIONS = {
 const NAV_ITEMS = [
   { id: 'pulse', icon: Activity, label: 'Pulse' },
   { id: 'forge', icon: Sparkles, label: 'The Forge' },
+  { id: 'market', icon: ShoppingBag, label: 'Market' },
+  { id: 'chat', icon: MessageSquare, label: 'Chat' },
   { id: 'swarm', icon: Cpu, label: 'Swarm' },
   { id: 'memory', icon: Database, label: 'Memory' },
   { id: 'evolution', icon: GitBranch, label: 'Evolution' },
@@ -364,6 +368,12 @@ function App() {
       <main className="dashboard-main">
         {activeTab === 'forge' ? (
           <TheForge />
+        ) : activeTab === 'market' ? (
+          <Marketplace />
+        ) : activeTab === 'chat' ? (
+          <div className="h-full p-6">
+            <ChatPanel />
+          </div>
         ) : (
           <ResonanceCore pulse={pulse} history={history} />
         )}

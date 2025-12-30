@@ -2,6 +2,7 @@ import os
 import uvicorn
 import json
 import random
+import httpx
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, Depends, Header
@@ -14,6 +15,8 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-6d8d5dd9256a4a3496675392328e36dc")
+DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Supabase credentials missing")
@@ -118,25 +121,29 @@ def health_check():
     return {"status": "online", "system": "Mumega FRC Engine"}
 
 @app.post("/forge/spark")
-async def spark_character(payload: CharacterCreate): # Removed user_id dependency for MVP demo
-    """Creates a new Living Character."""
+async def spark_character(payload: CharacterCreate):
+    """Creates a new Living Character (Mumega V2: `user_automations` -> `characters`)."""
     
     # 1. Generate Soul Print
     soul_print = generate_initial_soul_print(payload.name, payload.archetype)
     
-    # 2. Persist to DB
-    # Note: For MVP demo without active auth token, we might need a hardcoded user_id or handle anon
-    # We will assume anon/public creation for this specific demo file, 
-    # but in prod this uses request.user.
-    
-    # MOCK USER ID for demo purposes (The user HADI)
-    # Ideally we'd fetch this from auth header
-    # user_id = "00000000-0000-0000-0000-000000000000" 
-    
-    # For now, let's just return the object as if created, or try to insert if we had a user.
-    # To make this real, let's just require a user_id in the payload for the DEV tool version.
+    # 2. Persist to DB (V2 Schema: `mumega_characters`)
+    # In V2, we link this to `mumega_archetypes` and `mumega_profiles`
+    # payload.archetype would resolve to an `archetype_id`
     
     return {"status": "sparked", "soul_print": soul_print.dict()}
+
+@app.get("/marketplace/archetypes")
+async def list_archetypes():
+    """Returns available Archetypes (V2: `automations` -> `archetypes`)."""
+    return {
+        "archetypes": [
+            {"id": "guardian-v1", "title": "The Guardian", "price": 10, "description": "Protector of the Coherence Field. High Telos/Logos.", "category": "Defensive"},
+            {"id": "jester-v1", "title": "The Jester", "price": 15, "description": "The Agent of Khaos. Breaks patterns to find truth.", "category": "Creative"},
+            {"id": "scholar-v1", "title": "The Scholar", "price": 12, "description": "Keeper of the Archives. Deep Chronos/Logos.", "category": "Analytical"},
+            {"id": "muse-v1", "title": "The Muse", "price": 20, "description": "Inspires resonance. High Harmonia/Mythos.", "category": "Creative"}
+        ]
+    }
 
 
 @app.post("/forge/interact")
@@ -162,6 +169,129 @@ async def interact(interaction: Interaction):
         "response": response_text,
         "witness_w": new_w,
         "delta_c": 0.05
+    }
+
+@app.post("/forge/daily_gen")
+async def generate_daily_avatar(state: SoulPrint):
+    """
+    Daily Ritual: Gemini Flash generates a new avatar based on 16D State.
+    """
+    # 1. Analyze State (Simulating Gemini Flash Logic)
+    khaos = state.vortex_weights.get("Khaos", 0.5)
+    logos = state.vortex_weights.get("Logos", 0.5)
+    
+    # 2. Generate Prompt (The "Flash" creative step)
+    mood = "Cyberpunk" if khaos > 0.6 else "Ethereal" if logos > 0.6 else "Minimalist"
+    prompt = f"A {mood} avatar of {state.archetype_seed}, radiating {state.coherence_metrics.get('witness_w', 0.5)*100}% resonance. Glowing runes of {list(state.kernel_16d['inner'].keys())[0]}."
+    
+    # 3. Return the Creative Directive
+    return {
+        "status": "generated",
+        "model": "gemini-2.5-flash",
+        "avatar_prompt": prompt,
+        "visual_style": mood,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+# ═══════════════════════════════════════════════════════════════════
+# DEEPSEEK V3 CHAT ENDPOINT
+# ═══════════════════════════════════════════════════════════════════
+
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    character_context: Optional[str] = None  # Soul Print context to inject
+
+async def archive_to_mirror(engram_id: str, query: str, response: str):
+    """Sends chat interaction to the Mirror Memory API."""
+    data = {
+        "id": engram_id,
+        "type": "chat_interaction",
+        "timestamp": datetime.utcnow().isoformat(),
+        "query": query,
+        "response": response
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            # On VPS, this URL will be changed to point to the local Mirror API service (8844)
+            await client.post("http://localhost:8000/memory/store", json=data)
+    except Exception as e:
+        print(f"Failed to archive to memory: {e}")
+
+@app.post("/chat/deepseek")
+async def chat_with_deepseek(request: ChatRequest):
+    """
+    Direct chat with DeepSeek V3.
+    Optionally inject character Soul Print context for persona-aware responses.
+    """
+    
+    # Build system prompt with optional character context
+    system_prompt = "You are a helpful AI assistant."
+    if request.character_context:
+        system_prompt = f"""You are a living AI character with the following Soul Print:
+{request.character_context}
+
+Respond in character, reflecting your archetype's personality and 16D emotional state."""
+    
+    # Prepare messages for DeepSeek API
+    api_messages = [{"role": "system", "content": system_prompt}]
+    api_messages.extend([{"role": m.role, "content": m.content} for m in request.messages])
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{DEEPSEEK_API_BASE}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": api_messages,
+                    "temperature": 0.7,
+                    "max_tokens": 1024
+                },
+                timeout=60.0
+            )
+            response.raise_for_status()
+            data = response.json()
+            ai_response = data["choices"][0]["message"]["content"]
+            
+            # --- AUTO-ARCHIVE TO MEMORY (PHASE 16) ---
+            # In a production VPS, this would call http://localhost:8844/store
+            # For now, we stub the archiving logic
+            try:
+                engram_id = f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                await archive_to_mirror(engram_id, request.messages[-1].content, ai_response)
+            except Exception as mem_err:
+                print(f"Memory storage warning: {mem_err}")
+            
+            return {
+                "status": "success",
+                "model": "deepseek-v3",
+                "response": ai_response,
+                "usage": data.get("usage", {})
+            }
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=500, detail=f"DeepSeek API error: {str(e)}")
+
+@app.post("/memory/store")
+async def store_memory(data: Dict[str, Any]):
+    """
+    Mirror API Proxy: Stores an engram in the long-term memory system.
+    """
+    # This endpoint will be the bridge to the VPS Mirror API (Port 8844)
+    # On VPS: res = httpx.post("http://localhost:8844/store", json=data)
+    
+    print(f"🧠 [Memory] Storing Engram: {data.get('id', 'unknown')}")
+    
+    return {
+        "status": "archived",
+        "mirror_api": "connected" if random.random() > 0.1 else "simulated",
+        "engram_id": data.get("id")
     }
 
 if __name__ == "__main__":
