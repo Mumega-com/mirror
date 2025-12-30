@@ -1,9 +1,8 @@
-
-import React, { useEffect, useState, useRef } from 'react';
-import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer, AreaChart, Area, XAxis, Tooltip } from 'recharts';
+import React, { useEffect, useState, useCallback } from 'react';
+import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer, AreaChart, Area, Tooltip } from 'recharts';
 import { supabase } from './lib/supabase';
-import { Activity, Cpu, Database, GitBranch, Zap, Brain, Layers, Sparkles, Radio, Terminal, ShoppingBag, MessageSquare } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { Activity, Cpu, Database, GitBranch, Zap, Brain, Sparkles, Radio, Terminal, ShoppingBag, MessageSquare, ChevronLeft, ChevronRight } from 'lucide-react';
+import { motion } from 'framer-motion';
 import TheForge from './TheForge';
 import Marketplace from './Marketplace';
 import ChatPanel from './ChatPanel';
@@ -17,71 +16,115 @@ const DIMENSIONS = {
   outer: ['Pt', 'Et', 'Μt', 'Vt', 'Nt', 'Δt', 'Rt', 'Φt']
 };
 
-const NAV_ITEMS = [
-  { id: 'pulse', icon: Activity, label: 'Pulse' },
-  { id: 'forge', icon: Sparkles, label: 'The Forge' },
-  { id: 'market', icon: ShoppingBag, label: 'Market' },
-  { id: 'chat', icon: MessageSquare, label: 'Chat' },
-  { id: 'swarm', icon: Cpu, label: 'Swarm' },
-  { id: 'memory', icon: Database, label: 'Memory' },
-  { id: 'evolution', icon: GitBranch, label: 'Evolution' },
+// Grouped navigation for better organization
+const NAV_GROUPS = [
+  {
+    label: 'Core',
+    items: [
+      { id: 'pulse', icon: Activity, label: 'Pulse', shortcut: '1' },
+      { id: 'chat', icon: MessageSquare, label: 'Chat', shortcut: '2' },
+    ]
+  },
+  {
+    label: 'Create',
+    items: [
+      { id: 'forge', icon: Sparkles, label: 'The Forge', shortcut: '3' },
+      { id: 'market', icon: ShoppingBag, label: 'Market', shortcut: '4' },
+    ]
+  },
+  {
+    label: 'System',
+    items: [
+      { id: 'swarm', icon: Cpu, label: 'Swarm', shortcut: '5' },
+      { id: 'memory', icon: Database, label: 'Memory', shortcut: '6' },
+      { id: 'evolution', icon: GitBranch, label: 'Evolution', shortcut: '7' },
+    ]
+  }
 ];
+
+// Flat list for keyboard navigation
+const ALL_NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 
 // ═══════════════════════════════════════════════════════════════════
 // SIDEBAR COMPONENT
 // ═══════════════════════════════════════════════════════════════════
 
-const Sidebar = ({ activeTab, setActiveTab, logs }) => (
-  <div className="dashboard-sidebar">
+const Sidebar = ({ activeTab, setActiveTab, logs, collapsed, setCollapsed }) => (
+  <div className={`dashboard-sidebar transition-all duration-300 ${collapsed ? 'w-16' : 'w-64'}`}>
     {/* Logo */}
-    <div className="p-6 border-b border-white/5">
+    <div className="p-4 border-b border-white/5">
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center">
-          <Sparkles className="w-5 h-5 text-white" />
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center flex-shrink-0">
+          <Sparkles className="w-4 h-4 text-white" />
         </div>
-        <div>
-          <h1 className="font-bold text-white text-lg tracking-tight">MIRROR</h1>
-          <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">Cognitive Interface</p>
-        </div>
+        {!collapsed && (
+          <div className="overflow-hidden">
+            <h1 className="font-bold text-white text-sm tracking-tight">MIRROR</h1>
+            <p className="text-[9px] text-slate-500 font-mono uppercase">v9.0</p>
+          </div>
+        )}
+        <button
+          onClick={() => setCollapsed(!collapsed)}
+          className="ml-auto p-1 text-slate-500 hover:text-white rounded transition-colors"
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {collapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+        </button>
       </div>
     </div>
 
     {/* Navigation */}
-    <nav className="flex-1 p-4 space-y-1">
-      {NAV_ITEMS.map(item => (
-        <button
-          key={item.id}
-          onClick={() => setActiveTab(item.id)}
-          className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-300 group
-            ${activeTab === item.id
-              ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30'
-              : 'text-slate-400 hover:bg-white/5 hover:text-white border border-transparent'}`}
-        >
-          <item.icon className="w-5 h-5" />
-          <span className="text-sm font-medium">{item.label}</span>
-          {activeTab === item.id && (
-            <div className="ml-auto w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
+    <nav className="flex-1 p-2 space-y-4 overflow-y-auto">
+      {NAV_GROUPS.map(group => (
+        <div key={group.label}>
+          {!collapsed && (
+            <div className="px-3 py-1 text-[10px] text-slate-600 uppercase tracking-wider font-mono">
+              {group.label}
+            </div>
           )}
-        </button>
+          <div className="space-y-1">
+            {group.items.map(item => (
+              <button
+                key={item.id}
+                onClick={() => setActiveTab(item.id)}
+                title={collapsed ? `${item.label} (${item.shortcut})` : undefined}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-150
+                  ${activeTab === item.id
+                    ? 'bg-indigo-500/20 text-indigo-400 border-l-2 border-indigo-400'
+                    : 'text-slate-400 hover:bg-white/5 hover:text-white border-l-2 border-transparent'}`}
+              >
+                <item.icon className="w-4 h-4 flex-shrink-0" />
+                {!collapsed && (
+                  <>
+                    <span className="text-sm">{item.label}</span>
+                    <span className="ml-auto text-[10px] text-slate-600 font-mono">{item.shortcut}</span>
+                  </>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
       ))}
     </nav>
 
-    {/* Live Logs */}
-    <div className="border-t border-white/5 p-4 h-64">
-      <div className="flex items-center gap-2 mb-3 text-xs text-slate-500">
-        <Terminal className="w-3 h-3" />
-        <span className="font-mono uppercase tracking-wider">Live Stream</span>
-        <div className="status-online ml-auto" />
+    {/* Live Logs - only show when expanded */}
+    {!collapsed && (
+      <div className="border-t border-white/5 p-3 h-48">
+        <div className="flex items-center gap-2 mb-2 text-[10px] text-slate-500">
+          <Terminal className="w-3 h-3" />
+          <span className="font-mono uppercase">Activity</span>
+          <div className="status-online ml-auto" />
+        </div>
+        <div className="h-32 overflow-y-auto font-mono text-[10px] space-y-0.5 text-slate-500">
+          {logs.slice(-15).map((log, i) => (
+            <div key={i} className="flex gap-1 hover:text-slate-300 transition-colors truncate">
+              <span className="text-slate-700">{log.time?.slice(0, 5)}</span>
+              <span className={log.type === 'error' ? 'text-pink-400' : log.type === 'success' ? 'text-emerald-400' : ''}>{log.msg}</span>
+            </div>
+          ))}
+        </div>
       </div>
-      <div className="h-48 overflow-y-auto font-mono text-[11px] space-y-1 text-slate-400">
-        {logs.slice(-20).map((log, i) => (
-          <div key={i} className="flex gap-2 hover:text-slate-200 transition-colors">
-            <span className="text-slate-600">{log.time}</span>
-            <span className={log.type === 'error' ? 'text-pink-400' : log.type === 'success' ? 'text-emerald-400' : ''}>{log.msg}</span>
-          </div>
-        ))}
-      </div>
-    </div>
+    )}
   </div>
 );
 
@@ -197,14 +240,12 @@ const RightPanel = ({ swarmData, engramCount }) => (
       {/* Constellation Visualization */}
       <div className="relative h-40 bg-black/40 rounded-xl border border-white/5 flex items-center justify-center overflow-hidden">
         {/* Central Node */}
-        <motion.div
+        <div
           className="absolute w-12 h-12 bg-indigo-600 rounded-full flex items-center justify-center border-2 border-indigo-400/50 z-10"
           style={{ boxShadow: '0 0 30px rgba(99, 102, 241, 0.5)' }}
-          animate={{ scale: [1, 1.05, 1] }}
-          transition={{ duration: 2, repeat: Infinity }}
         >
           <Brain className="w-5 h-5 text-white" />
-        </motion.div>
+        </div>
 
         {/* Worker Nodes */}
         {(swarmData?.workers || []).slice(0, 5).map((w, i) => {
@@ -212,16 +253,13 @@ const RightPanel = ({ swarmData, engramCount }) => (
           const x = Math.cos(angle) * 60;
           const y = Math.sin(angle) * 60;
           return (
-            <motion.div
+            <div
               key={i}
               className="absolute w-8 h-8 bg-slate-800 rounded-lg border border-indigo-500/30 flex items-center justify-center"
               style={{ transform: `translate(${x}px, ${y}px)` }}
-              initial={{ opacity: 0, scale: 0 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ delay: i * 0.1 }}
             >
               <Zap className="w-3 h-3 text-indigo-400" />
-            </motion.div>
+            </div>
           );
         })}
       </div>
@@ -300,6 +338,7 @@ const Footer = ({ latestPulse }) => (
 
 function App() {
   const [activeTab, setActiveTab] = useState('pulse');
+  const [collapsed, setCollapsed] = useState(false);
   const [pulse, setPulse] = useState(null);
   const [history, setHistory] = useState([]);
   const [swarmData, setSwarmData] = useState(null);
@@ -310,6 +349,26 @@ function App() {
     const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
     setLogs(prev => [...prev.slice(-50), { time, msg, type }]);
   };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Only trigger if not typing in an input
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+      const key = e.key;
+      if (key >= '1' && key <= '7') {
+        const item = ALL_NAV_ITEMS[parseInt(key) - 1];
+        if (item) {
+          setActiveTab(item.id);
+          addLog(`Switched to ${item.label}`, 'info');
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   useEffect(() => {
     addLog('Initializing Mirror Interface...');
@@ -363,7 +422,13 @@ function App() {
 
   return (
     <div className="dashboard-grid bg-constellation">
-      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} logs={logs} />
+      <Sidebar
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        logs={logs}
+        collapsed={collapsed}
+        setCollapsed={setCollapsed}
+      />
 
       <main className="dashboard-main">
         {activeTab === 'forge' ? (

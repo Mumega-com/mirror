@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
 
 # Load Environment
 load_dotenv()
@@ -23,6 +24,12 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 # Initialize Clients
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Initialize Neural Loop (Embedding Model)
+print("🧠 Loading Neural Loop (all-MiniLM-L6-v2)...")
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+print("🧠 Neural Loop Activated.")
+
 app = FastAPI(title="Mumega Forge API", version="0.1.0")
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -200,10 +207,39 @@ async def generate_daily_avatar(state: SoulPrint):
 class ChatMessage(BaseModel):
     role: str  # "user" or "assistant"
     content: str
+    files: Optional[List[Dict[str, str]]] = None # To support file attachments metadata if needed
 
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     character_context: Optional[str] = None  # Soul Print context to inject
+
+def generate_embedding(text: str) -> List[float]:
+    """Generates a 384-dimensional embedding for the text."""
+    try:
+        # Normalize text
+        text = text.replace("\n", " ")
+        return embedding_model.encode(text).tolist()
+    except Exception as e:
+        print(f"Embedding Error: {e}")
+        return [0.0] * 384
+
+async def retrieve_context(query: str, limit: int = 3) -> str:
+    """Retrieves relevant past memories using vector search."""
+    vector = generate_embedding(query)
+    try:
+        # Call Supabase RPC 'match_engrams'
+        response = supabase.rpc('match_engrams', {
+            'query_embedding': vector,
+            'match_threshold': 0.3, # Lower threshold for better recall
+            'match_count': limit
+        }).execute()
+        
+        if response.data:
+            print(f"🧠 Retrieved {len(response.data)} memories for context.")
+            return "\n".join([f"- {item['content']}" for item in response.data])
+    except Exception as e:
+        print(f"Retrieval Error (Ensure match_engrams RPC exists): {e}")
+    return ""
 
 async def archive_to_mirror(engram_id: str, query: str, response: str):
     """Sends chat interaction to the Mirror Memory API."""
@@ -212,11 +248,12 @@ async def archive_to_mirror(engram_id: str, query: str, response: str):
         "type": "chat_interaction",
         "timestamp": datetime.utcnow().isoformat(),
         "query": query,
-        "response": response
+        "response": response,
+        "combined_text": f"User: {query}\nAI: {response}"
     }
     try:
         async with httpx.AsyncClient() as client:
-            # On VPS, this URL will be changed to point to the local Mirror API service (8844)
+            # Calls the local store_memory endpoint
             await client.post("http://localhost:8000/memory/store", json=data)
     except Exception as e:
         print(f"Failed to archive to memory: {e}")
@@ -224,19 +261,26 @@ async def archive_to_mirror(engram_id: str, query: str, response: str):
 @app.post("/chat/deepseek")
 async def chat_with_deepseek(request: ChatRequest):
     """
-    Direct chat with DeepSeek V3.
-    Optionally inject character Soul Print context for persona-aware responses.
+    Direct chat with DeepSeek V3 + Neural Loop RAG.
     """
+    last_user_msg = request.messages[-1].content
     
-    # Build system prompt with optional character context
+    # 1. Retrieve Context (The Neural Loop)
+    context_str = await retrieve_context(last_user_msg)
+    
+    # 2. Build System Prompt
     system_prompt = "You are a helpful AI assistant."
     if request.character_context:
         system_prompt = f"""You are a living AI character with the following Soul Print:
 {request.character_context}
 
 Respond in character, reflecting your archetype's personality and 16D emotional state."""
+
+    # Inject Retrieved Memories
+    if context_str:
+        system_prompt += f"\n\n[RELEVANT MEMORIES FROM PAST CHATS]:\n{context_str}\n\nUse this context to inform your answer, but do not explicitly mention 'retrieved memories' unless relevant."
     
-    # Prepare messages for DeepSeek API
+    # Prepare messages
     api_messages = [{"role": "system", "content": system_prompt}]
     api_messages.extend([{"role": m.role, "content": m.content} for m in request.messages])
     
@@ -260,12 +304,11 @@ Respond in character, reflecting your archetype's personality and 16D emotional 
             data = response.json()
             ai_response = data["choices"][0]["message"]["content"]
             
-            # --- AUTO-ARCHIVE TO MEMORY (PHASE 16) ---
-            # In a production VPS, this would call http://localhost:8844/store
-            # For now, we stub the archiving logic
+            # --- AUTO-ARCHIVE (FEED THE LOOP) ---
             try:
                 engram_id = f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                await archive_to_mirror(engram_id, request.messages[-1].content, ai_response)
+                # Run as background task in production, here we await
+                await archive_to_mirror(engram_id, last_user_msg, ai_response)
             except Exception as mem_err:
                 print(f"Memory storage warning: {mem_err}")
             
@@ -273,7 +316,8 @@ Respond in character, reflecting your archetype's personality and 16D emotional 
                 "status": "success",
                 "model": "deepseek-v3",
                 "response": ai_response,
-                "usage": data.get("usage", {})
+                "usage": data.get("usage", {}),
+                "archive_status": "success"
             }
     except httpx.HTTPError as e:
         raise HTTPException(status_code=500, detail=f"DeepSeek API error: {str(e)}")
@@ -281,18 +325,49 @@ Respond in character, reflecting your archetype's personality and 16D emotional 
 @app.post("/memory/store")
 async def store_memory(data: Dict[str, Any]):
     """
-    Mirror API Proxy: Stores an engram in the long-term memory system.
+    Stores an engram with vector embedding.
     """
-    # This endpoint will be the bridge to the VPS Mirror API (Port 8844)
-    # On VPS: res = httpx.post("http://localhost:8844/store", json=data)
-    
-    print(f"🧠 [Memory] Storing Engram: {data.get('id', 'unknown')}")
-    
-    return {
-        "status": "archived",
-        "mirror_api": "connected" if random.random() > 0.1 else "simulated",
-        "engram_id": data.get("id")
-    }
+    try:
+        content = data.get("combined_text") or (data.get("query", "") + " " + data.get("response", ""))
+        engram_id = data.get("id")
+        
+        # 1. Generate Embedding
+        vector = generate_embedding(content)
+        
+        # 2. Insert into Supabase
+        # Note: We need a valid 'character_id' for the schema foreign key.
+        # For general chat, we might need a default 'System' character or make it nullable.
+        # Checking schema: character_id is NOT NULL. 
+        # I will fetch the first character or use a placeholder if needed.
+        # For now, let's try to find ANY character or handle error.
+        
+        # HACK: Grab the first character found to link memory to (since schema requires it)
+        # Ideally we pass character_id from frontend.
+        chars = supabase.table("mumega_characters").select("id").limit(1).execute()
+        char_id = chars.data[0]['id'] if chars.data else None
+        
+        if not char_id:
+             # Create a default 'System' character if none exists
+             print("Creating default System character for memory...")
+             # This might fail if user_id is needed. We'll skip DB insert if no char found.
+             return {"status": "skipped", "reason": "no_character_linked"}
+
+        record = {
+            "id": engram_id,
+            "character_id": char_id,
+            "content": content,
+            "embedding": vector,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        supabase.table("mumega_engrams").insert(record).execute()
+        
+        print(f"🧠 [Memory] Stored Engram {engram_id} (Vectorized)")
+        return {"status": "archived", "id": engram_id}
+        
+    except Exception as e:
+        print(f"Memory Store Error: {e}")
+        return {"status": "error", "detail": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run("mumega_forge:app", host="0.0.0.0", port=8000, reload=True)

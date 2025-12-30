@@ -16,60 +16,57 @@ const MarketplaceCard = ({ item, onSelect }) => {
 
     return (
         <motion.div
-            whileHover={{ y: -4 }}
-            className="group relative bg-black/40 backdrop-blur-xl border border-white/5 rounded-xl overflow-hidden hover:border-indigo-500/50 transition-all duration-300"
+            whileHover={{ y: -8, scale: 1.02 }}
+            className="group relative bg-black/40 backdrop-blur-2xl border border-white/5 rounded-3xl overflow-hidden hover:border-indigo-500/30 transition-all duration-500 shadow-xl"
         >
-            {/* Hover Glow */}
-            <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/5 via-transparent to-purple-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+            {/* Ambient Background Glow */}
+            <div className="absolute -top-10 -right-10 w-32 h-32 bg-indigo-500/5 blur-3xl rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
 
-            <div className="p-6 relative z-10 space-y-4">
+            <div className="p-8 relative z-10 space-y-6">
 
                 {/* Header */}
                 <div className="flex justify-between items-start">
-                    <div>
-                        <div className="flex items-center gap-2 mb-1">
-                            <span className="text-xs font-mono text-indigo-400 uppercase tracking-wider">{category}</span>
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full border ${getComplexityColor(complexity)}`}>
-                                {complexity}
-                            </span>
+                    <div className="space-y-1">
+                        <div className="flex items-center gap-3">
+                            <span className="text-[10px] font-mono text-indigo-400 uppercase tracking-[0.2em]">{category}</span>
+                            <div className={`text-[8px] px-2 py-0.5 rounded-full border font-mono uppercase tracking-tighter ${getComplexityColor(complexity)}`}>
+                                {complexity} CORE
+                            </div>
                         </div>
-                        <h3 className="text-xl font-bold text-white group-hover:text-indigo-300 transition-colors">{title}</h3>
-                    </div>
-                    <div className="flex items-center gap-1 bg-white/5 px-2 py-1 rounded-lg">
-                        <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
-                        <span className="text-xs font-bold text-white">{rating}</span>
-                        <span className="text-[10px] text-slate-500">({reviews})</span>
+                        <h3 className="text-2xl font-light text-white group-hover:text-indigo-200 transition-colors tracking-tight">{title}</h3>
                     </div>
                 </div>
 
                 {/* Description */}
-                <p className="text-sm text-slate-400 line-clamp-2 min-h-[40px] leading-relaxed">
+                <p className="text-sm text-slate-400/80 line-clamp-2 min-h-[40px] leading-relaxed font-light">
                     {description}
                 </p>
 
-                {/* Stats Grid */}
-                <div className="grid grid-cols-2 gap-2 py-2">
-                    <div className="flex items-center gap-2 text-xs text-slate-500">
-                        <Clock className="w-3 h-3" />
-                        <span>{stats?.duration || 'Instant'}</span>
+                {/* Stats / Tickers */}
+                <div className="flex items-center gap-6 py-2 border-y border-white/5">
+                    <div className="flex items-center gap-2 text-[10px] font-mono text-slate-500 uppercase tracking-widest">
+                        <Clock className="w-3 h-3 text-indigo-500/40" />
+                        <span>{stats?.duration || 'INSTANT'}</span>
                     </div>
-                    <div className="flex items-center gap-2 text-xs text-slate-500">
-                        <Zap className="w-3 h-3" />
-                        <span>{stats?.installations || 0} installs</span>
+                    <div className="flex items-center gap-2 text-[10px] font-mono text-slate-500 uppercase tracking-widest">
+                        <Zap className="w-3 h-3 text-indigo-500/40" />
+                        <span>{stats?.installations || 0} SEEDS</span>
                     </div>
                 </div>
 
-                {/* Footer / Action */}
-                <div className="flex items-center justify-between pt-2 border-t border-white/5">
-                    <div className="font-mono font-bold text-white">
-                        {price} <span className="text-xs text-slate-500 font-sans font-normal">credits</span>
+                {/* Action Bar */}
+                <div className="flex items-center justify-between pt-2">
+                    <div className="flex flex-col">
+                        <span className="text-[9px] font-mono text-slate-600 uppercase tracking-tighter">Flux Cost</span>
+                        <div className="text-xl font-light text-white">
+                            {price} <span className="text-[10px] text-indigo-400/60 font-mono uppercase">Credits</span>
+                        </div>
                     </div>
                     <button
                         onClick={() => onSelect(item)}
-                        className="px-4 py-2 bg-white/5 hover:bg-indigo-600 text-white text-xs font-bold rounded-lg transition-all duration-300 flex items-center gap-2 group-hover:shadow-lg group-hover:shadow-indigo-500/20"
+                        className="px-6 py-3 bg-white/5 hover:bg-white/10 text-white text-[10px] font-mono tracking-[0.2em] uppercase rounded-2xl border border-white/5 transition-all duration-300 group-hover:border-indigo-500/20 group-hover:shadow-[0_0_20px_rgba(99,102,241,0.1)]"
                     >
-                        <span>VIEW DETAILS</span>
-                        <Shield className="w-3 h-3" />
+                        Review DNA
                     </button>
                 </div>
 

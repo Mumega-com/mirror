@@ -6,6 +6,15 @@
   --void-light: #12121a;
   --void-glow: #1a1a2e;
 
+  /* Living Presence (Mood-Synced) */
+  --presence-color-primary: #6366f1;
+  --presence-color-secondary: #a855f7;
+  --presence-glow-intensity: 0.6;
+  --presence-blur: 40px;
+  --mood-hue: 240;
+  --mood-saturation: 80%;
+  --mood-lightness: 60%;
+
   --indigo-deep: #4338ca;
   --indigo-core: #6366f1;
   --indigo-glow: #818cf8;
@@ -31,7 +40,7 @@
   /* Gradients */
   --gradient-indigo: linear-gradient(135deg, var(--indigo-deep), var(--indigo-core));
   --gradient-cyan: linear-gradient(135deg, var(--cyan-deep), var(--cyan-core));
-  --gradient-glow: linear-gradient(135deg, var(--indigo-core), var(--cyan-core));
+  --gradient-glow: linear-gradient(135deg, var(--presence-color-primary), var(--presence-color-secondary));
 
   /* Shadows & Glows */
   --glow-indigo: 0 0 20px rgba(99, 102, 241, 0.4), 0 0 40px rgba(99, 102, 241, 0.2);
@@ -42,6 +51,65 @@
   --glass-bg: rgba(255, 255, 255, 0.03);
   --glass-border: rgba(255, 255, 255, 0.08);
   --glass-blur: blur(12px);
+}
+
+@keyframes pulse-aura {
+  0% {
+    filter: blur(var(--presence-blur)) brightness(1);
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  50% {
+    filter: blur(calc(var(--presence-blur) * 1.5)) brightness(1.2);
+    transform: translate(-50%, -50%) scale(1.1);
+  }
+
+  100% {
+    filter: blur(var(--presence-blur)) brightness(1);
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes drift {
+  0% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.living-bg {
+  background: radial-gradient(circle at center,
+      hsla(var(--mood-hue), var(--mood-saturation), var(--mood-lightness), 0.15) 0%,
+      transparent 70%);
+  background-size: 200% 200%;
+  animation: drift 20s infinite ease-in-out;
+  transition: all 2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.aura-presence {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 60vh;
+  height: 60vh;
+  border-radius: 50%;
+  background: radial-gradient(circle,
+      var(--presence-color-primary) 0%,
+      var(--presence-color-secondary) 40%,
+      transparent 70%);
+  opacity: var(--presence-glow-intensity);
+  filter: blur(var(--presence-blur));
+  animation: pulse-aura 15s infinite alternate ease-in-out;
+  pointer-events: none;
+  z-index: 0;
 }
 
 * {

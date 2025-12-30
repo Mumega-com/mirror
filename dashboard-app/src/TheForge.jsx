@@ -82,13 +82,13 @@ const TheForge = () => {
     return (
         <div className="h-full flex flex-col p-6 overflow-y-auto">
             {/* Header */}
-            <div className="flex items-center gap-4 mb-8">
-                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white shadow-lg shadow-indigo-500/20">
-                    <Sparkles className="w-6 h-6" />
+            <div className="flex items-center gap-6 mb-12">
+                <div className="w-14 h-14 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shadow-[0_0_30px_rgba(99,102,241,0.2)]">
+                    <Sparkles className="w-7 h-7" />
                 </div>
                 <div>
-                    <h2 className="text-2xl font-bold text-white tracking-tight">The Forge</h2>
-                    <p className="text-slate-400 font-mono text-xs">Genesis Engine v1.0</p>
+                    <h2 className="text-3xl font-light text-white tracking-tight">The Genesis Forge</h2>
+                    <p className="text-indigo-400/60 font-mono text-[10px] uppercase tracking-[0.3em]">Seed Extraction Module</p>
                 </div>
             </div>
 
@@ -132,17 +132,20 @@ const TheForge = () => {
                         </div>
 
                         {/* Action */}
-                        <div className="flex justify-end pt-4">
+                        <div className="flex justify-center pt-8">
                             <button
                                 onClick={handleSpark}
                                 disabled={!name || !selectedArchetype}
-                                className={`flex items-center gap-2 px-8 py-4 rounded-xl font-bold text-sm tracking-widest transition-all duration-500
+                                className={`group relative flex items-center gap-4 px-12 py-5 rounded-3xl font-mono text-xs tracking-[0.4em] transition-all duration-700
                   ${(!name || !selectedArchetype)
-                                        ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
-                                        : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/20 hover:shadow-indigo-500/40 hover:scale-105'}`}
+                                        ? 'bg-white/5 text-slate-600 cursor-not-allowed border border-white/5'
+                                        : 'bg-indigo-600 text-white shadow-[0_0_50px_rgba(79,70,229,0.4)] hover:shadow-[0_0_70px_rgba(79,70,229,0.6)] hover:scale-105 active:scale-95'}`}
                             >
-                                <Zap className="w-4 h-4" />
-                                <span>SPARK LIFE</span>
+                                <Zap className={`w-4 h-4 transition-transform duration-700 ${(!name || !selectedArchetype) ? '' : 'group-hover:rotate-12 group-hover:scale-125'}`} />
+                                <span className="uppercase">Spark Resonance</span>
+                                {name && selectedArchetype && (
+                                    <div className="absolute inset-0 bg-white/20 rounded-3xl opacity-0 group-hover:animate-pulse pointer-events-none" />
+                                )}
                             </button>
                         </div>
                     </motion.div>
