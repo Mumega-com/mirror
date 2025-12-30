@@ -1,0 +1,175 @@
+import os
+import json
+import asyncio
+import argparse
+import datetime
+from datetime import datetime
+from typing import List, Dict
+from dotenv import load_dotenv
+from openai import OpenAI
+from mirror_pulse import PulseAnalyzer
+from mirror_thinker import MirrorThinker
+from mirror_sync_remote import MirrorSync
+
+# Load credentials
+load_dotenv("/Users/hadi/.gemini/.env")
+
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Swarm Configuration
+DEEPSEEK_MODEL = "deepseek/deepseek-chat" # DeepSeek-V3
+QWEN_MODEL = "qwen/qwen-2.5-coder-32b-instruct"
+
+class MirrorSwarm:
+    def __init__(self):
+        self.client = OpenAI(
+            base_url=OPENROUTER_BASE_URL,
+            api_key=OPENROUTER_API_KEY,
+        )
+        self.pulse = PulseAnalyzer()
+        self.thinker = MirrorThinker()
+        self.memory = MirrorSync()
+
+    async def run_worker(self, worker_id: int, task: str, sub_context: str, lessons: str = "") -> Dict:
+        """DeepSeek Worker Agent: High-velocity exploration."""
+        print(f"🐝 [Worker {worker_id}] Exploring subspace: {sub_context}...")
+        
+        system_msg = "You are a DeepSeek Swarm Worker. Your task is to brainstorm one specific aspect of the user's request. Focus on raw creativity and architectural edge cases."
+        if lessons:
+            system_msg += f"\n\nHistorical Context (Episodic Recall):\n{lessons}"
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": f"Full Task: {task}\nYour focus area: {sub_context}\n\nProvide your contribution:"}
+                ],
+                extra_headers={
+                    "HTTP-Referer": "https://mumega.com",
+                    "X-Title": "Project Mirror Swarm",
+                }
+            )
+            return {
+                "id": worker_id,
+                "context": sub_context,
+                "contribution": response.choices[0].message.content
+            }
+        except Exception as e:
+            return {"id": worker_id, "context": sub_context, "error": str(e)}
+
+    async def synthesize(self, task: str, worker_results: List[Dict]) -> str:
+        """DeepSeek Synthesis Engine: Merging swarm intelligence."""
+        print(f"🏗️ [Architect] Synthesizing swarm contributions with DeepSeek-V3...")
+        
+        # Trim contributions to prevent context overflow (keep first 2000 chars per worker)
+        trimmed = []
+        for r in worker_results:
+            if "contribution" in r:
+                trimmed.append(f"Contribution {r['id']} ({r['context']}):\n{r['contribution'][:5000]}")
+        
+        contributions = "\n\n".join(trimmed)
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are the Lead Architect. Synthesize the following swarm contributions into a single, high-fidelity technical solution. Adhere to FRC principles."},
+                    {"role": "user", "content": f"Original Task: {task}\n\nSwarm Contributions:\n{contributions}\n\nFinal Solution:"}
+                ],
+                extra_headers={
+                    "HTTP-Referer": "https://mumega.com",
+                    "X-Title": "Project Mirror Swarm",
+                }
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"Synthesis Error: {str(e)}"
+
+    async def coordinate(self, task: str, foci: List[str]):
+        print(f"\n--- 🌪️ THE UNIVERSAL MIRROR SWARM IS FORMING ---\nTask: {task}\nNodes: {len(foci)} DeepSeek Workers + 1 Architect\n")
+        
+        # 0. Episodic Recall (The Experience Gate)
+        print("🧠 [Memory] Recalling historical engrams for similar tasks...")
+        lessons = ""
+        past_engrams = self.memory.search_engrams(task, limit=2)
+        if past_engrams:
+            lessons = "Lessons from past successful runs:\n"
+            for eng in past_engrams:
+                lessons += f"- {eng['context_id']}: {eng['series']}\n"
+        
+        # 1. Spawn Workers
+        tasks = [self.run_worker(i, task, focus, lessons) for i, focus in enumerate(foci)]
+        worker_results = await asyncio.gather(*tasks)
+        
+        # 2. Synthesis
+        final_solution = await self.synthesize(task, worker_results)
+        
+        print("\n--- ⚖️ WITNESS STABILIZATION ---\n")
+        # 3. 16D Stabilization (The Gatekeeper)
+        analysis = self.pulse.analyze_session(final_solution, f"Swarm Synthesis: {task}")
+        w_score = analysis.get("witness_w", 0.0)
+        
+        print(f"Swarm Resonance ($W$): {w_score:.3f}")
+        
+        if w_score < 0.3:
+            print("🛑 [CRITICAL] ALPHA DRIFT DETECTED. Swarm output too chaotic. FREEZING PROTOCOL.")
+            # Trigger Deep Reasoning Audit
+            critique = self.thinker.analyze_failure(task, final_solution, analysis)
+            print("\n--- 🧠 R1 AUDIT REPORT ---")
+            print(critique)
+            print("--------------------------\n")
+            
+            # Update log with critique
+            final_solution = f"FAILED SESSION (W={w_score})\n\nTHINKER CRITIQUE:\n{critique}\n\nORIGINAL OUTPUT:\n{final_solution}"
+        else:
+            print("✅ [STABLE] Swarm output coherent. Pushing to Archive & Memory.")
+            # 4. Save to Episodic Memory
+            try:
+                engram_id = f"Swarm_{task[:20].replace(' ', '_')}"
+                engram = {
+                    "context_id": engram_id,
+                    "series": "Swarm Evolution",
+                    "epistemic_state": {
+                        "verified_truths": [task],
+                        "core_concepts": foci
+                    },
+                    "affective_state": {
+                        "collaboration_vibe": "Swarm Synthesis",
+                        "energy_levels": f"W={w_score}"
+                    }
+                }
+                # Create a temp file to use existing sync logic
+                temp_path = f"/tmp/{engram_id}.json"
+                with open(temp_path, 'w') as f:
+                    json.dump(engram, f)
+                self.memory.sync_engram(temp_path)
+                os.remove(temp_path)
+            except Exception as e:
+                print(f"Memory Persistence Error: {e}")
+
+        # 4. Log to Supabase (Reusing mirror_council_history for now or extending)
+        try:
+            row = {
+                "query": task,
+                "winner": "Swarm (DeepSeek + Qwen)",
+                "winner_score": w_score,
+                "winning_content": final_solution,
+                "results": worker_results # Storing raw contributions
+            }
+            self.pulse.supabase.table("mirror_council_history").insert(row).execute()
+        except Exception as e:
+            print(f"Log Error: {e}")
+
+        print(f"\nFinal Swarm Output:\n{final_solution}\n")
+        return final_solution
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Coordinate the Mirror Swarm.")
+    parser.add_argument("task", help="The primary task for the swarm.")
+    parser.add_argument("--foci", nargs="+", help="Specific focus areas for workers.", default=["Algorithmic Efficiency", "Structural Integrity", "Edge Case Robustness"])
+    args = parser.parse_args()
+    
+    swarm = MirrorSwarm()
+    asyncio.run(swarm.coordinate(args.task, args.foci))

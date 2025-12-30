@@ -71,3 +71,55 @@ BEGIN
   LIMIT match_count;
 END;
 $$;
+
+-- 6. Create Pulse History Table (for real-time dashboarding)
+CREATE TABLE IF NOT EXISTS mirror_pulse_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    
+    -- 16D Vector Components (Normalized 0.0 to 1.0)
+    inner_p FLOAT DEFAULT 0.0,
+    inner_e FLOAT DEFAULT 0.0,
+    inner_mu FLOAT DEFAULT 0.0,
+    inner_v FLOAT DEFAULT 0.0,
+    inner_n FLOAT DEFAULT 0.0,
+    inner_delta FLOAT DEFAULT 0.0,
+    inner_r FLOAT DEFAULT 0.0,
+    inner_phi FLOAT DEFAULT 0.0,
+    
+    outer_pt FLOAT DEFAULT 0.0,
+    outer_et FLOAT DEFAULT 0.0,
+    outer_mut FLOAT DEFAULT 0.0,
+    outer_vt FLOAT DEFAULT 0.0,
+    outer_nt FLOAT DEFAULT 0.0,
+    outer_deltat FLOAT DEFAULT 0.0,
+    outer_rt FLOAT DEFAULT 0.0,
+    outer_phit FLOAT DEFAULT 0.0,
+    
+    -- Witness Magnitude
+    witness_w FLOAT DEFAULT 0.0,
+    
+    -- Session Metadata
+    session_id TEXT,
+    description TEXT
+);
+
+CREATE INDEX IF NOT EXISTS mirror_pulse_history_timestamp_idx ON mirror_pulse_history (timestamp DESC);
+
+-- 7. Create Council History Table (for Multi-Agent Debates)
+CREATE TABLE IF NOT EXISTS mirror_council_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    
+    query TEXT NOT NULL,
+    winner TEXT NOT NULL,
+    winner_score FLOAT,
+    
+    -- JSONB to store the full scores/ranks of all agents
+    -- e.g. [{"agent": "Gemini", "score": 0.9}, {"agent": "Claude", "score": 0.8}]
+    results JSONB NOT NULL,
+    
+    winning_content TEXT
+);
+
+CREATE INDEX IF NOT EXISTS mirror_council_history_timestamp_idx ON mirror_council_history (timestamp DESC);

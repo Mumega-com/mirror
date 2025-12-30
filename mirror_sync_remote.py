@@ -1,8 +1,9 @@
-
 import os
 import json
 import uuid
 import argparse
+import datetime
+from datetime import datetime
 from typing import List, Dict
 from dotenv import load_dotenv
 
@@ -60,13 +61,13 @@ class MirrorSync:
         
         data = {
             "context_id": engram['context_id'],
-            "timestamp": engram['timestamp'],
-            "series": engram.get('series'),
-            "epistemic_truths": engram['epistemic_state']['verified_truths'],
-            "core_concepts": engram['epistemic_state'].get('core_concepts', []),
-            "affective_vibe": engram['affective_state']['collaboration_vibe'],
-            "energy_level": engram['affective_state']['energy_levels'],
-            "next_attractor": engram['next_attractor'],
+            "timestamp": engram.get('timestamp', datetime.now().isoformat()),
+            "series": engram.get('series', 'FRC Foundation'),
+            "epistemic_truths": engram.get('epistemic_state', {}).get('verified_truths', []),
+            "core_concepts": engram.get('epistemic_state', {}).get('core_concepts', []),
+            "affective_vibe": engram.get('affective_state', {}).get('collaboration_vibe', 'Formal'),
+            "energy_level": engram.get('affective_state', {}).get('energy_levels', 'Stable'),
+            "next_attractor": engram.get('next_attractor', 'Further Research'),
             "raw_data": engram,
             "embedding": embedding
         }
