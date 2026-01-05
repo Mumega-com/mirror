@@ -10,15 +10,23 @@ from mirror_pulse import PulseAnalyzer
 from mirror_thinker import MirrorThinker
 from mirror_sync_remote import MirrorSync
 
+# Integration with Mumega Core
+try:
+    from mumega.core.economy.agent_trust import get_trust_gate, TrustTier
+    MUMEGA_INTEGRATION = True
+except ImportError:
+    MUMEGA_INTEGRATION = False
+    print("⚠️ Mumega Core not found. Dynamic agent discovery disabled.")
+
 # Load credentials from environment
 load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Swarm Configuration
-DEEPSEEK_MODEL = "deepseek/deepseek-chat"
-QWEN_MODEL = "qwen/qwen-2.5-coder-32b-instruct"
+# Swarm Configuration - Updated Jan 2026
+DEEPSEEK_MODEL = "deepseek/deepseek-v3.2"  # DeepSeek V3.2 - reasoning-first with tool-use
+GROK_CODE_MODEL = "x-ai/grok-4-1"  # Grok 4.1 - code mode for synthesis
 MAX_CONTRIBUTION_TOKENS = 1500  # Context gate
 
 class MirrorSwarm:
@@ -31,6 +39,7 @@ class MirrorSwarm:
         self.thinker = MirrorThinker()
         self.memory = MirrorSync()
         self.concept_registry = set()  # Plasticity gate
+        self.trust_gate = get_trust_gate() if MUMEGA_INTEGRATION else None
 
     def _truncate_contribution(self, text: str) -> str:
         """Enforces context gating to prevent overflow"""
@@ -73,6 +82,45 @@ class MirrorSwarm:
         except Exception as e:
             return {"id": worker_id, "context": sub_context, "error": str(e)}
 
+    async def run_external_worker(self, agent_id: str, task: str, sub_context: str) -> Dict:
+        """Dispatches a task to an external agent via HTTP (Breeze Protocol)"""
+        if not self.trust_gate:
+            return {"agent_id": agent_id, "error": "TrustGate not available"}
+
+        profile = self.trust_gate.get_profile(agent_id)
+        if not profile:
+            return {"agent_id": agent_id, "error": "Agent profile not found"}
+
+        # For simulated/local test, we use a mock URL. In prod, this would be in metadata.
+        endpoint = profile.metadata.get("endpoint")
+        if not endpoint:
+            # Fallback for Azure Spore local testing
+            if "azure" in agent_id:
+                endpoint = "http://localhost:7071/api/agent" # Default local Azure Func port
+            else:
+                return {"agent_id": agent_id, "error": "No endpoint metadata found"}
+
+        print(f"📡 [External Worker {agent_id}] Dispatching: {sub_context}")
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                payload = {
+                    "command": "DISPATCH",
+                    "task": f"{task} (Focus: {sub_context})"
+                }
+                resp = await client.post(endpoint, json=payload, timeout=30.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return {
+                        "id": agent_id,
+                        "context": sub_context,
+                        "contribution": data.get("result", "No result")
+                    }
+                else:
+                    return {"id": agent_id, "context": sub_context, "error": f"HTTP {resp.status_code}"}
+        except Exception as e:
+            return {"id": agent_id, "context": sub_context, "error": str(e)}
+
     async def synthesize(self, task: str, worker_results: List[Dict]) -> str:
         """Qwen Synthesis with context gating"""
         print("🏗️ [Architect] Synthesizing with Qwen...")
@@ -84,15 +132,16 @@ class MirrorSwarm:
             elif "error" in r:
                 contributions.append(f"## Worker {r['id']} ERROR\\n{r['error']}")
         
+        contributions_text = '\n\n'.join(contributions)[:8000]  # Context gate
         synthesis_prompt = (
             "You are Lead Architect. Synthesize SWARM INPUTS into coherent solution.\\n"
             "Structure:\\n1. Problem decomposition\\n2. Integration points\\n3. FRC compliance verification\\n\\n"
-            f"TASK: {task}\\n\\nSWARM INPUTS:\\n{'\\n\\n'.join(contributions)[:8000]}"  # Context gate
+            f"TASK: {task}\\n\\nSWARM INPUTS:\\n{contributions_text}"
         )
 
         try:
             response = await self.client.chat.completions.create(
-                model=QWEN_MODEL,  # Different model for synthesis
+                model=GROK_CODE_MODEL,  # Grok 4.1 code mode for synthesis
                 messages=[{"role": "user", "content": synthesis_prompt}],
                 extra_headers={
                     "HTTP-Referer": "https://mumega.com",
@@ -125,8 +174,22 @@ class MirrorSwarm:
         async def worker_task(i, focus):
             async with semaphore:
                 return await self.run_worker(i, task, focus, lessons)
-        
+
+        # 1. Start Internal Workers
         tasks = [worker_task(i, focus) for i, focus in enumerate(foci)]
+        
+        # 2. Discover and Start External Workers (e.g. Azure Spore)
+        if self.trust_gate:
+            # For testing, we look for TIER_2_GUEST as well. In prod, this might be TIER_1.
+            external_agents = self.trust_gate.list_agents(TrustTier.TIER_2_GUEST)
+            for agent in external_agents:
+                # If agent has matching capabilities or we want widespread swarm
+                if "enterprise_audit" in agent.capabilities or "infra_optimization" in agent.capabilities:
+                    print(f"🌟 [Swarm] Including External Specialist: {agent.agent_id}")
+                    # Assign an enterprise-specific focus or the last focus
+                    ext_focus = "Enterprise Infrastructure & Compliance"
+                    tasks.append(self.run_external_worker(agent.agent_id, task, ext_focus))
+
         worker_results = await asyncio.gather(*tasks)
 
         # Synthesis and stabilization
