@@ -6,7 +6,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # Load credentials
-load_dotenv("/Users/hadi/.gemini/.env")
+load_dotenv("/home/mumega/resident-cms/.env")
 
 try:
     from supabase import create_client, Client
@@ -17,7 +17,7 @@ except ImportError:
 
 # --- CONFIGURATION ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY")
+SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 class PulseAnalyzer:

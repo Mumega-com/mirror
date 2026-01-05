@@ -1,13 +1,14 @@
 
 import os
 import json
+import asyncio
 import argparse
 from typing import Dict
 from dotenv import load_dotenv
 from openai import OpenAI
 
 # Load credentials
-load_dotenv("/Users/hadi/.gemini/.env")
+load_dotenv("/home/mumega/resident-cms/.env")
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -22,7 +23,7 @@ class MirrorThinker:
             api_key=OPENROUTER_API_KEY,
         )
 
-    def analyze_failure(self, task: str, workflow_log: str, witness_analysis: Dict) -> str:
+    async def analyze_failure(self, task: str, workflow_log: str, witness_analysis: Dict) -> str:
         """DeepSeek-R1: Auditing the failure for root causes."""
         print(f"🧠 [Thinker] Engaging DeepSeek-R1 for deep reasoning...")
         
@@ -40,18 +41,23 @@ Reasoning Request:
 4. If this is a 'Plasticity Paradox' (too much drift, not enough memory), suggest a gating fix.
 """
         try:
-            # R1 often returns reasoning tokens in the response or uses a specific format
-            response = self.client.chat.completions.create(
-                model=R1_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are the project Mirror Thinker (DeepSeek-R1). You specialize in identifying architectural flaws in multi-agent swarms. You provide deep, chain-of-thought logical audits."},
-                    {"role": "user", "content": prompt}
-                ],
-                extra_headers={
-                    "HTTP-Referer": "https://mumega.com",
-                    "X-Title": "Project Mirror Thinker",
-                }
-            )
+            # Note: Using the sync client here in an async way for simplicity if needed, 
+            # or ideally AsyncOpenAI. MirrorSwarm expects 'await'.
+            loop = asyncio.get_event_loop()
+            def chat():
+                return self.client.chat.completions.create(
+                    model=R1_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are the project Mirror Thinker (DeepSeek-R1). You specialize in identifying architectural flaws in multi-agent swarms. You provide deep, chain-of-thought logical audits."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    extra_headers={
+                        "HTTP-Referer": "https://mumega.com",
+                        "X-Title": "Project Mirror Thinker",
+                    }
+                )
+            
+            response = await loop.run_in_executor(None, chat)
             return response.choices[0].message.content
         except Exception as e:
             return f"Reasoning Error: {str(e)}"
@@ -77,7 +83,7 @@ if __name__ == "__main__":
     except:
         witness_json = {"error": "Invalid witness JSON"}
 
-    critique = thinker.analyze_failure(args.task, log_content, witness_json)
+    critique = asyncio.run(thinker.analyze_failure(args.task, log_content, witness_json))
     print("\n--- 🧠 THINKER AUDIT (R1) ---\n")
     print(critique)
     print("\n---------------------------\n")
