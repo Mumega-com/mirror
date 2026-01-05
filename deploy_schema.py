@@ -4,10 +4,10 @@ import psycopg2
 from dotenv import load_dotenv
 
 # Load credentials
-load_dotenv("/Users/hadi/.gemini/.env")
+load_dotenv("/home/mumega/resident-cms/.env")
 
 DB_URL = os.environ.get("SUPABASE_CONNECTION_STRING")
-SCHEMA_PATH = "/Users/hadi/.gemini/antigravity/experiments/Project_Mirror/schema.sql"
+SCHEMA_PATH = "/home/mumega/mirror/schema.sql"
 
 def apply_schema():
     if not DB_URL:

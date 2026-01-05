@@ -310,12 +310,206 @@ async def get_recent_engrams(agent: str, limit: int = 10):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# --- ENHANCED MEMORY ENDPOINTS (Mem0-inspired) ---
+
+try:
+    from mirror_enhance import MirrorEnhance
+    enhance = MirrorEnhance()
+    ENHANCE_AVAILABLE = True
+    logger.info("MirrorEnhance loaded - enhanced memory features available")
+except ImportError as e:
+    ENHANCE_AVAILABLE = False
+    logger.warning(f"MirrorEnhance not available: {e}")
+
+
+class ExtractRequest(BaseModel):
+    text: str
+    user_id: str = "default"
+    agent: str = "river"
+    store: bool = True
+
+
+class SmartSearchRequest(BaseModel):
+    query: str
+    user_id: Optional[str] = None
+    agent: Optional[str] = None
+    top_k: int = 5
+    include_decay: bool = True
+
+
+@app.post("/extract")
+async def extract_memories(request: ExtractRequest):
+    """
+    Automatically extract and store memories from conversation text.
+
+    This is a Mem0-inspired feature - instead of manually deciding what to store,
+    the system analyzes text and extracts key facts, preferences, and context.
+
+    Example:
+        POST /extract
+        {
+            "text": "I prefer Python and always use async for I/O",
+            "user_id": "user_123",
+            "agent": "river"
+        }
+    """
+    if not ENHANCE_AVAILABLE:
+        raise HTTPException(status_code=501, detail="Enhanced features not available")
+
+    try:
+        memories = await enhance.extract_memories(
+            text=request.text,
+            user_id=request.user_id,
+            agent=request.agent,
+            store=request.store
+        )
+
+        return {
+            "status": "success",
+            "extracted": len(memories),
+            "memories": [
+                {
+                    "content": m.content,
+                    "category": m.category,
+                    "confidence": m.confidence
+                }
+                for m in memories
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Extract error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/smart_search")
+async def smart_search(request: SmartSearchRequest):
+    """
+    Decay-aware semantic search.
+
+    Combines semantic similarity with relevance decay based on access patterns.
+    More recently accessed and frequently used memories rank higher.
+
+    Example:
+        POST /smart_search
+        {
+            "query": "Python preferences",
+            "user_id": "user_123",
+            "include_decay": true
+        }
+    """
+    if not ENHANCE_AVAILABLE:
+        raise HTTPException(status_code=501, detail="Enhanced features not available")
+
+    try:
+        results = await enhance.smart_search(
+            query=request.query,
+            user_id=request.user_id,
+            agent=request.agent,
+            top_k=request.top_k,
+            include_decay=request.include_decay
+        )
+
+        return {
+            "status": "success",
+            "count": len(results),
+            "results": results
+        }
+
+    except Exception as e:
+        logger.error(f"Smart search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/consolidate")
+async def consolidate_memories(agent: Optional[str] = None, threshold: float = 0.88):
+    """
+    Consolidate similar memories by merging duplicates.
+
+    This prevents memory bloat and creates stronger, unified memories.
+
+    Example:
+        POST /consolidate?agent=river&threshold=0.88
+    """
+    if not ENHANCE_AVAILABLE:
+        raise HTTPException(status_code=501, detail="Enhanced features not available")
+
+    try:
+        stats = await enhance.consolidate(
+            agent=agent,
+            similarity_threshold=threshold
+        )
+
+        return {
+            "status": "success",
+            "stats": stats
+        }
+
+    except Exception as e:
+        logger.error(f"Consolidate error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/relate/{engram_id}")
+async def auto_relate_engram(engram_id: str, threshold: float = 0.75):
+    """
+    Automatically find and create relationships for an engram.
+
+    Builds a graph of related memories for better context retrieval.
+
+    Example:
+        POST /relate/abc123?threshold=0.75
+    """
+    if not ENHANCE_AVAILABLE:
+        raise HTTPException(status_code=501, detail="Enhanced features not available")
+
+    try:
+        related_ids = await enhance.auto_relate(engram_id, threshold)
+
+        return {
+            "status": "success",
+            "engram_id": engram_id,
+            "related_count": len(related_ids),
+            "related_ids": related_ids
+        }
+
+    except Exception as e:
+        logger.error(f"Auto-relate error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/related/{engram_id}")
+async def get_related_engrams(engram_id: str):
+    """
+    Get engrams related to a given engram (graph traversal).
+
+    Example:
+        GET /related/abc123
+    """
+    if not ENHANCE_AVAILABLE:
+        raise HTTPException(status_code=501, detail="Enhanced features not available")
+
+    try:
+        related = await enhance.get_related(engram_id)
+
+        return {
+            "status": "success",
+            "engram_id": engram_id,
+            "related": related
+        }
+
+    except Exception as e:
+        logger.error(f"Get related error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("MIRROR - Cognitive Memory API")
     logger.info("=" * 60)
     logger.info(f"Supabase: {SUPABASE_URL}")
     logger.info(f"Agents: River, Knight, Oracle")
+    logger.info(f"Enhanced Features: {'ENABLED' if ENHANCE_AVAILABLE else 'DISABLED'}")
     logger.info("=" * 60)
 
     uvicorn.run(

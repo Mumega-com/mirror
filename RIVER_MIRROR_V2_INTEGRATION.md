@@ -166,14 +166,22 @@ python3 mirror_pulse.py --log /tmp/river_bot.log --desc "River's Daily Conversat
 
 ## 🔧 Architecture Update
 
+**🛰️ PRODUCTION NERVOUS SYSTEM: `engine.digid.ca`**
+
+All cognitive infrastructure now routed through the Digid Engine:
+- **n8n Automation:** `https://engine.digid.ca/` → Port 5678
+- **Mirror API:** `https://engine.digid.ca/mirror/` → Port 8844
+- **n8n MCP Server:** `https://engine.digid.ca/mcp/` → Port 9100
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                        RIVER'S ECOSYSTEM                          │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  ┌───────────────────┐         ┌──────────────────┐            │
+│  ┌───────────────────┐         �┌──────────────────┐            │
 │  │   River Bot       │◄────────┤  Mirror API      │            │
-│  │   (Telegram)      │         │  (Port 8844)     │            │
+│  │   (Telegram)      │         │  (engine.digid.ca│            │
+│  │                   │         │  /mirror/)       │            │
 │  │                   │         │                  │            │
 │  │ • Chat with users │         │ • Semantic Search│            │
 │  │ • Task execution  │         │ • Memory Storage │            │

@@ -11,7 +11,7 @@ import ast
 from mirror_swarm import MirrorSwarm
 
 # Load credentials
-load_dotenv("/Users/hadi/.gemini/.env")
+load_dotenv("/home/mumega/resident-cms/.env")
 
 class MirrorEvolution:
     def __init__(self):
