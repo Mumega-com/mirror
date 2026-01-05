@@ -143,10 +143,22 @@ class MirrorCouncil:
     def get_agent_response(self, agent_name: str, system_prompt: str, query: str) -> Dict:
         print(f"[{agent_name}] Deliberating...")
         try:
+            # Add current date/time context
+            from datetime import datetime
+            try:
+                local_tz = datetime.now().astimezone().tzinfo
+                now = datetime.now(local_tz)
+                tz_name = now.strftime('%Z')
+            except:
+                now = datetime.utcnow()
+                tz_name = "UTC"
+
+            current_datetime = now.strftime("%A, %B %d, %Y at %I:%M %p")
+
             response = self.client.chat.completions.create(
                 model="gpt-4o",  # Simulating different cognitive architectures via personas
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": f"{system_prompt}\n\nCURRENT DATE AND TIME: {current_datetime} {tz_name}"},
                     {"role": "user", "content": f"Query from User: {query}\n\nProvide your best answer based on your specialization."}
                 ]
             )
