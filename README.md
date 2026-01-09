@@ -16,6 +16,15 @@ Project Mirror is a cognitive infrastructure designed to capture, persist, and r
 - **Cross-Model Compatibility**: Share research "headspace" across Claude, Gemini, and other LLMs.
 - **Archive Extraction**: Auto-generate engrams from markdown-based research archives (e.g., FRC 821, 16D series).
 
+## API Endpoints (v1.1.0)
+
+Mirror exposes a FastAPI service on port **8844** for internal coordination:
+
+- **POST /council/convene**: Trigger System 2 consensus via Mirror Council.
+- **POST /swarm/dispatch**: Dispatch parallel workers for multi-focus analysis.
+- **POST /search**: Semantic search across the engram knowledge base.
+- **GET /stats**: Health and memory statistics.
+
 ## Setup
 
 1.  **Environment**: Create a `.env` file with:
