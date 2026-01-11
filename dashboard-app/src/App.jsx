@@ -258,7 +258,7 @@ const RightPanel = ({ swarmData, engramCount }) => (
       </div>
       <div className="flex items-center gap-2">
         <div className="status-online" />
-        <span className="text-xs text-slate-400">DeepSeek-R1 Ready</span>
+        <span className="text-xs text-slate-400">Grok 4.1 Reasoning Ready</span>
       </div>
     </div>
 

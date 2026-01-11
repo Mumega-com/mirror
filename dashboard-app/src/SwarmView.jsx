@@ -61,7 +61,7 @@ const SwarmView = () => {
                         <h2 className="text-xl font-bold text-white tracking-wider font-mono">UNIVERSAL SWARM</h2>
                         <div className="flex items-center gap-2 mt-1">
                             <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                            <span className="text-xs text-indigo-300 font-mono">DEEPSEEK-V3 NODES ONLINE</span>
+                            <span className="text-xs text-indigo-300 font-mono">GROK-4.1 NODES ONLINE</span>
                         </div>
                     </div>
                 </div>

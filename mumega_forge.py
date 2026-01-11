@@ -15,11 +15,18 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-6d8d5dd9256a4a3496675392328e36dc")
-DEEPSEEK_API_BASE = "https://api.deepseek.com/v1"
+XAI_API_KEY = os.getenv("XAI_API_KEY")
+XAI_API_BASE = "https://api.x.ai/v1"
+FORGE_ENABLED = os.getenv("MUMEGA_FORGE_ENABLED", "false").lower() == "true"
+
+if not FORGE_ENABLED:
+    raise RuntimeError("Mumega Forge API is disabled by default. Set MUMEGA_FORGE_ENABLED=true to run.")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Supabase credentials missing")
+
+if not XAI_API_KEY:
+    raise ValueError("XAI_API_KEY missing (required for Mumega Forge)")
 
 # Initialize Clients
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -194,7 +201,7 @@ async def generate_daily_avatar(state: SoulPrint):
     }
 
 # ═══════════════════════════════════════════════════════════════════
-# DEEPSEEK V3 CHAT ENDPOINT
+# GROK 4.1 CHAT ENDPOINT
 # ═══════════════════════════════════════════════════════════════════
 
 class ChatMessage(BaseModel):
@@ -221,10 +228,10 @@ async def archive_to_mirror(engram_id: str, query: str, response: str):
     except Exception as e:
         print(f"Failed to archive to memory: {e}")
 
-@app.post("/chat/deepseek")
-async def chat_with_deepseek(request: ChatRequest):
+@app.post("/chat/grok")
+async def chat_with_grok(request: ChatRequest):
     """
-    Direct chat with DeepSeek V3.
+    Direct chat with Grok 4.1 Reasoning.
     Optionally inject character Soul Print context for persona-aware responses.
     """
     
@@ -236,20 +243,20 @@ async def chat_with_deepseek(request: ChatRequest):
 
 Respond in character, reflecting your archetype's personality and 16D emotional state."""
     
-    # Prepare messages for DeepSeek API
+    # Prepare messages for xAI API
     api_messages = [{"role": "system", "content": system_prompt}]
     api_messages.extend([{"role": m.role, "content": m.content} for m in request.messages])
     
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{DEEPSEEK_API_BASE}/chat/completions",
+                f"{XAI_API_BASE}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Authorization": f"Bearer {XAI_API_KEY}",
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "deepseek-chat",
+                    "model": "grok-4.1-fast-reasoning",
                     "messages": api_messages,
                     "temperature": 0.7,
                     "max_tokens": 1024
@@ -271,12 +278,12 @@ Respond in character, reflecting your archetype's personality and 16D emotional 
             
             return {
                 "status": "success",
-                "model": "deepseek-v3",
+                "model": "grok-4.1-fast-reasoning",
                 "response": ai_response,
                 "usage": data.get("usage", {})
             }
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"DeepSeek API error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"xAI API error: {str(e)}")
 
 @app.post("/memory/store")
 async def store_memory(data: Dict[str, Any]):

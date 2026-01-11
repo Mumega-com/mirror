@@ -1,0 +1,319 @@
+"""
+Hermes Cryptography - Our Own Encryption System
+
+Custom encryption layer for Hermes vaults.
+Works locally without external dependencies.
+Tied to Kay Hermes NFT for access control.
+
+Features:
+- AES-256 encryption (or fallback to simpler XOR for mobile)
+- Key derivation from Kay Hermes token
+- Message-level encryption
+- Vault sealing/unsealing
+- Works offline / local-first
+
+Author: Kasra (CEO Mumega)
+Date: 2026-01-09
+"""
+
+import os
+import hashlib
+import secrets
+import base64
+import json
+from typing import Optional, Tuple
+from dataclasses import dataclass
+
+# Try to import cryptography, fallback to pure Python
+try:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.backends import default_backend
+    CRYPTO_LIB = "cryptography"
+except ImportError:
+    CRYPTO_LIB = "pure_python"
+
+
+@dataclass
+class EncryptedPayload:
+    """Encrypted data container."""
+    ciphertext: str      # Base64 encoded
+    nonce: str           # Base64 encoded
+    tag: str             # Base64 encoded (for authenticated encryption)
+    version: str = "1"   # Encryption version
+    method: str = "aes256gcm"  # Encryption method
+
+    def to_dict(self) -> dict:
+        return {
+            "ct": self.ciphertext,
+            "n": self.nonce,
+            "t": self.tag,
+            "v": self.version,
+            "m": self.method
+        }
+
+    def to_json(self) -> str:
+        return base64.b64encode(json.dumps(self.to_dict()).encode()).decode()
+
+    @classmethod
+    def from_json(cls, data: str) -> 'EncryptedPayload':
+        decoded = json.loads(base64.b64decode(data))
+        return cls(
+            ciphertext=decoded["ct"],
+            nonce=decoded["n"],
+            tag=decoded["t"],
+            version=decoded.get("v", "1"),
+            method=decoded.get("m", "aes256gcm")
+        )
+
+
+class HermesCrypto:
+    """
+    Hermes encryption system.
+
+    Derives encryption keys from Kay Hermes tokens.
+    Supports both full AES-GCM and fallback XOR cipher.
+    """
+
+    KEY_LENGTH = 32  # 256 bits
+    NONCE_LENGTH = 12  # 96 bits for GCM
+
+    def __init__(self, use_fallback: bool = False):
+        """
+        Initialize crypto system.
+
+        Args:
+            use_fallback: Force use of pure Python fallback
+        """
+        self.use_fallback = use_fallback or CRYPTO_LIB == "pure_python"
+
+    def derive_key(self, kay_token: str, salt: bytes) -> bytes:
+        """
+        Derive encryption key from Kay Hermes token.
+
+        Uses PBKDF2-like derivation for security.
+        """
+        # Simple but secure key derivation
+        # Multiple rounds of SHA-256 with salt
+        key = kay_token.encode() + salt
+        for _ in range(100000):  # 100k iterations
+            key = hashlib.sha256(key).digest()
+        return key[:self.KEY_LENGTH]
+
+    def derive_key_fast(self, kay_token: str, salt: bytes) -> bytes:
+        """Fast key derivation for mobile/local use."""
+        # Fewer iterations for mobile performance
+        key = kay_token.encode() + salt
+        for _ in range(10000):  # 10k iterations
+            key = hashlib.sha256(key).digest()
+        return key[:self.KEY_LENGTH]
+
+    def encrypt(self, plaintext: str, key: bytes) -> EncryptedPayload:
+        """
+        Encrypt plaintext with derived key.
+
+        Returns EncryptedPayload that can be serialized.
+        """
+        if self.use_fallback:
+            return self._encrypt_fallback(plaintext, key)
+        return self._encrypt_aes_gcm(plaintext, key)
+
+    def decrypt(self, payload: EncryptedPayload, key: bytes) -> str:
+        """
+        Decrypt payload with derived key.
+
+        Returns plaintext string.
+        """
+        if payload.method == "xor" or self.use_fallback:
+            return self._decrypt_fallback(payload, key)
+        return self._decrypt_aes_gcm(payload, key)
+
+    def _encrypt_aes_gcm(self, plaintext: str, key: bytes) -> EncryptedPayload:
+        """AES-256-GCM encryption."""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        nonce = secrets.token_bytes(self.NONCE_LENGTH)
+        aesgcm = AESGCM(key)
+        ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)
+
+        # GCM appends tag to ciphertext, split it
+        tag = ciphertext[-16:]
+        ct = ciphertext[:-16]
+
+        return EncryptedPayload(
+            ciphertext=base64.b64encode(ct).decode(),
+            nonce=base64.b64encode(nonce).decode(),
+            tag=base64.b64encode(tag).decode(),
+            version="1",
+            method="aes256gcm"
+        )
+
+    def _decrypt_aes_gcm(self, payload: EncryptedPayload, key: bytes) -> str:
+        """AES-256-GCM decryption."""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        nonce = base64.b64decode(payload.nonce)
+        ct = base64.b64decode(payload.ciphertext)
+        tag = base64.b64decode(payload.tag)
+
+        # Reconstruct ciphertext with tag
+        ciphertext = ct + tag
+
+        aesgcm = AESGCM(key)
+        plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+
+        return plaintext.decode()
+
+    def _encrypt_fallback(self, plaintext: str, key: bytes) -> EncryptedPayload:
+        """
+        Pure Python XOR encryption fallback.
+
+        Uses key expansion and XOR cipher.
+        Less secure than AES but works anywhere.
+        """
+        data = plaintext.encode()
+        nonce = secrets.token_bytes(self.NONCE_LENGTH)
+
+        # Expand key with nonce for unique keystream
+        expanded_key = self._expand_key(key, nonce, len(data))
+
+        # XOR cipher
+        ct = bytes(a ^ b for a, b in zip(data, expanded_key))
+
+        # Simple MAC for integrity
+        tag = hashlib.sha256(nonce + ct + key).digest()[:16]
+
+        return EncryptedPayload(
+            ciphertext=base64.b64encode(ct).decode(),
+            nonce=base64.b64encode(nonce).decode(),
+            tag=base64.b64encode(tag).decode(),
+            version="1",
+            method="xor"
+        )
+
+    def _decrypt_fallback(self, payload: EncryptedPayload, key: bytes) -> str:
+        """Pure Python XOR decryption fallback."""
+        nonce = base64.b64decode(payload.nonce)
+        ct = base64.b64decode(payload.ciphertext)
+        tag = base64.b64decode(payload.tag)
+
+        # Verify MAC
+        expected_tag = hashlib.sha256(nonce + ct + key).digest()[:16]
+        if tag != expected_tag:
+            raise ValueError("Authentication failed - data may be corrupted")
+
+        # Expand key
+        expanded_key = self._expand_key(key, nonce, len(ct))
+
+        # XOR decrypt
+        plaintext = bytes(a ^ b for a, b in zip(ct, expanded_key))
+
+        return plaintext.decode()
+
+    def _expand_key(self, key: bytes, nonce: bytes, length: int) -> bytes:
+        """Expand key to required length using hash chain."""
+        expanded = b""
+        counter = 0
+        while len(expanded) < length:
+            block = hashlib.sha256(key + nonce + counter.to_bytes(4, 'big')).digest()
+            expanded += block
+            counter += 1
+        return expanded[:length]
+
+
+class HermesVaultEncryption:
+    """
+    Vault-level encryption for Hermes.
+
+    Encrypts entire vault or individual messages.
+    Tied to Kay Hermes NFT token.
+    """
+
+    def __init__(self, kay_token: str, salt: bytes, fast_mode: bool = False):
+        """
+        Initialize vault encryption.
+
+        Args:
+            kay_token: The Kay Hermes access token
+            salt: Vault-specific salt
+            fast_mode: Use faster (mobile) key derivation
+        """
+        self.crypto = HermesCrypto()
+
+        if fast_mode:
+            self.key = self.crypto.derive_key_fast(kay_token, salt)
+        else:
+            self.key = self.crypto.derive_key(kay_token, salt)
+
+    def encrypt_message(self, content: str) -> str:
+        """Encrypt a single message."""
+        payload = self.crypto.encrypt(content, self.key)
+        return payload.to_json()
+
+    def decrypt_message(self, encrypted: str) -> str:
+        """Decrypt a single message."""
+        payload = EncryptedPayload.from_json(encrypted)
+        return self.crypto.decrypt(payload, self.key)
+
+    def encrypt_vault_data(self, data: dict) -> str:
+        """Encrypt vault metadata/data."""
+        json_str = json.dumps(data)
+        payload = self.crypto.encrypt(json_str, self.key)
+        return payload.to_json()
+
+    def decrypt_vault_data(self, encrypted: str) -> dict:
+        """Decrypt vault metadata/data."""
+        payload = EncryptedPayload.from_json(encrypted)
+        json_str = self.crypto.decrypt(payload, self.key)
+        return json.loads(json_str)
+
+
+def create_vault_key(kay_token: str) -> Tuple[bytes, str]:
+    """
+    Create a new vault encryption key.
+
+    Returns:
+        (salt, encrypted_test) - salt for storage, test string to verify decryption
+    """
+    salt = secrets.token_bytes(16)
+    vault_enc = HermesVaultEncryption(kay_token, salt, fast_mode=True)
+
+    # Create test string to verify key works
+    test_encrypted = vault_enc.encrypt_message("HERMES_VAULT_VERIFIED")
+
+    return salt, test_encrypted
+
+
+def verify_vault_key(kay_token: str, salt: bytes, test_encrypted: str) -> bool:
+    """Verify that kay_token can decrypt the vault."""
+    try:
+        vault_enc = HermesVaultEncryption(kay_token, salt, fast_mode=True)
+        decrypted = vault_enc.decrypt_message(test_encrypted)
+        return decrypted == "HERMES_VAULT_VERIFIED"
+    except Exception:
+        return False
+
+
+# Mobile-friendly quick functions
+def quick_encrypt(text: str, password: str) -> str:
+    """Quick encryption for mobile/local use."""
+    salt = secrets.token_bytes(16)
+    crypto = HermesCrypto(use_fallback=True)
+    key = crypto.derive_key_fast(password, salt)
+    payload = crypto.encrypt(text, key)
+
+    # Prepend salt to output
+    full_payload = base64.b64encode(salt).decode() + ":" + payload.to_json()
+    return full_payload
+
+
+def quick_decrypt(encrypted: str, password: str) -> str:
+    """Quick decryption for mobile/local use."""
+    parts = encrypted.split(":", 1)
+    salt = base64.b64decode(parts[0])
+    payload_json = parts[1]
+
+    crypto = HermesCrypto(use_fallback=True)
+    key = crypto.derive_key_fast(password, salt)
+    payload = EncryptedPayload.from_json(payload_json)
+
+    return crypto.decrypt(payload, key)

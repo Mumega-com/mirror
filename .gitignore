@@ -6,3 +6,8 @@ __pycache__/
 engrams/
 *.json
 !mirror_engram.json
+.env
+*.db
+*.log
+agents/
+data/
