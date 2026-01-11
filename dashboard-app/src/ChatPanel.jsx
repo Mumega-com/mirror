@@ -25,7 +25,7 @@ const ChatPanel = ({ characterContext = null }) => {
         setLoading(true);
 
         try {
-            const response = await fetch('http://localhost:8000/chat/deepseek', {
+            const response = await fetch('http://localhost:8000/chat/grok', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -63,7 +63,7 @@ const ChatPanel = ({ characterContext = null }) => {
                     <Bot className="w-4 h-4 text-white" />
                 </div>
                 <div>
-                    <h3 className="text-sm font-bold text-white">DeepSeek V3</h3>
+                    <h3 className="text-sm font-bold text-white">Grok 4.1 Reasoning</h3>
                     <p className="text-[10px] text-slate-500 font-mono">Direct API Connection</p>
                 </div>
                 {characterContext && (
@@ -79,7 +79,7 @@ const ChatPanel = ({ characterContext = null }) => {
                 {messages.length === 0 && (
                     <div className="text-center text-slate-500 text-sm py-8">
                         <Bot className="w-12 h-12 mx-auto mb-3 opacity-20" />
-                        <p>Start a conversation with DeepSeek V3</p>
+                        <p>Start a conversation with Grok 4.1 Reasoning</p>
                         {characterContext && (
                             <p className="text-xs text-indigo-400 mt-2">Character context loaded</p>
                         )}
@@ -145,7 +145,7 @@ const ChatPanel = ({ characterContext = null }) => {
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onKeyPress={handleKeyPress}
-                        placeholder="Message DeepSeek..."
+                        placeholder="Message Grok 4.1..."
                         className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50"
                         disabled={loading}
                     />

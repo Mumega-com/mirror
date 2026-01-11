@@ -44,22 +44,22 @@ class CouncilPreFilter:
 
     def __init__(self, use_llm: bool = True):
         self.use_llm = use_llm
-        # Use DeepSeek or Grok instead of OpenAI for cost efficiency
-        deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+        # Use Grok instead of OpenAI for cost efficiency
         xai_key = os.environ.get("XAI_API_KEY")
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
         openai_key = os.environ.get("OPENAI_API_KEY")
 
-        if deepseek_key:
+        if xai_key:
+            self.client = OpenAI(api_key=xai_key, base_url="https://api.x.ai/v1")
+            self.model = "grok-4.1-fast-reasoning"
+        elif deepseek_key:
             self.client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
             self.model = "deepseek-chat"
-        elif xai_key:
-            self.client = OpenAI(api_key=xai_key, base_url="https://api.x.ai/v1")
-            self.model = "grok-2-1212"
         elif openai_key:
             self.client = OpenAI(api_key=openai_key)
             self.model = "gpt-4o-mini"
         else:
-            raise ValueError("No API key found for council pre-filter (need DEEPSEEK_API_KEY, XAI_API_KEY, or OPENAI_API_KEY)")
+            raise ValueError("No API key found for council pre-filter (need XAI_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY)")
 
     def filter_agents(self, query: str, threshold: float = 0.4) -> List[str]:
         """

@@ -14,7 +14,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Reasoning Model
-R1_MODEL = "deepseek/deepseek-r1"
+GROK_REASONING_MODEL = "x-ai/grok-4.1-fast-reasoning"
 
 class MirrorThinker:
     def __init__(self):
@@ -24,8 +24,8 @@ class MirrorThinker:
         )
 
     async def analyze_failure(self, task: str, workflow_log: str, witness_analysis: Dict) -> str:
-        """DeepSeek-R1: Auditing the failure for root causes."""
-        print(f"🧠 [Thinker] Engaging DeepSeek-R1 for deep reasoning...")
+        """Grok 4.1 Reasoning: Auditing the failure for root causes."""
+        print(f"🧠 [Thinker] Engaging Grok 4.1 for deep reasoning...")
         
         prompt = f"""
 System Audit Request: Project Mirror Phase 7
@@ -46,9 +46,9 @@ Reasoning Request:
             loop = asyncio.get_event_loop()
             def chat():
                 return self.client.chat.completions.create(
-                    model=R1_MODEL,
+                    model=GROK_REASONING_MODEL,
                     messages=[
-                        {"role": "system", "content": "You are the project Mirror Thinker (DeepSeek-R1). You specialize in identifying architectural flaws in multi-agent swarms. You provide deep, chain-of-thought logical audits."},
+                        {"role": "system", "content": "You are the project Mirror Thinker (Grok 4.1 Reasoning). You specialize in identifying architectural flaws in multi-agent swarms. You provide deep, chain-of-thought logical audits."},
                         {"role": "user", "content": prompt}
                     ],
                     extra_headers={
