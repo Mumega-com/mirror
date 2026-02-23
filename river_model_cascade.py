@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-River Model Cascade - Intelligent Model + Key Rotation
+River Model Cascade - Intelligent Multi-Provider Fallback
 
-Cascading fallback system:
-1. Try primary model (gemini-3-pro-preview) with all API keys
-2. On exhaustion, fall back to secondary (gemini-2.5-pro) with all keys
-3. Then tertiary (gemini-3-flash-preview) with all keys
+Provider cascade:
+1. Gemini (with key rotation across 6 free tier keys)
+2. Grok (xAI) - secondary provider
+3. OpenRouter (free models) - final fallback
+
+Within Gemini:
+1. Try primary model (gemini-3-flash-preview) with all API keys
+2. On exhaustion, fall back to gemini-2.5-flash, then gemini-2.0-flash
 
 Features:
+- Multi-provider cascading fallback
 - Automatic key rotation on rate limit errors
-- Automatic model fallback on key exhaustion
-- Tracks usage per key per model
+- Per-provider model fallback
 - Self-healing: resets after cooldown period
 
 Author: Claude (Opus 4.5) for Kay Hermes
-Date: 2026-01-09
+Date: 2026-01-09, Updated: 2026-01-13
 """
 
 import os
@@ -26,18 +30,44 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger("river.cascade")
 
-# Model priority (thinking → fast)
-MODEL_CASCADE = [
-    "gemini-3-pro-preview",      # Best thinking
+# ==============================================================================
+# PROVIDER CASCADE CONFIGURATION
+# ==============================================================================
+
+# Provider priority
+PROVIDER_CASCADE = ["gemini", "grok", "openrouter"]
+
+# Gemini model priority (flash first for better quota)
+GEMINI_MODEL_CASCADE = [
+    "gemini-3-flash-preview",    # Primary - fast, decent quota
+    "gemini-2.5-flash",          # Faster, better quota
+    "gemini-2.0-flash",          # Fallback, highest quota
+    "gemini-3-pro-preview",      # Best thinking (low quota)
     "gemini-2.5-pro",            # Good thinking
-    "gemini-3-flash-preview",    # Fast
-    "gemini-2.5-flash",          # Faster
-    "gemini-2.0-flash",          # Fallback
+]
+
+# Grok models (xAI)
+GROK_MODEL_CASCADE = [
+    "grok-3-mini-fast",          # Fast, cheapest
+    "grok-3-mini",               # Balanced
+    "grok-3-fast",               # Fast full model
+]
+
+# OpenRouter free models (2026-01-13 verified via API)
+OPENROUTER_FREE_MODELS = [
+    "qwen/qwen3-coder:free",                 # Qwen3 Coder - great for reasoning
+    "moonshotai/kimi-k2:free",               # Kimi K2 - good general purpose
+    "mistralai/devstral-2512:free",          # Devstral 2 - agentic coding
+    "z-ai/glm-4.5-air:free",                 # GLM 4.5 Air - MoE agent model
+    "xiaomi/mimo-v2-flash:free",             # MiMo-V2 Flash
+    "tngtech/tng-r1t-chimera:free",          # TNG R1T Chimera - reasoning
+    "openai/gpt-oss-120b:free",              # OpenAI OSS 120B
 ]
 
 # Rate limit cooldown (seconds)
 KEY_COOLDOWN = 60  # 1 minute cooldown per key
 MODEL_COOLDOWN = 300  # 5 minute cooldown before retrying exhausted model
+PROVIDER_COOLDOWN = 600  # 10 minute cooldown for entire provider
 
 
 @dataclass
@@ -113,13 +143,53 @@ class ModelState:
         return any(k.is_available() for k in self.keys)
 
 
+@dataclass
+class ProviderState:
+    """Track state of a provider."""
+    provider: str
+    models: List[ModelState] = field(default_factory=list)
+    exhausted_at: Optional[datetime] = None
+    current_model_index: int = 0
+
+    def is_available(self) -> bool:
+        """Check if provider has any available models."""
+        if self.exhausted_at:
+            cooldown_end = self.exhausted_at + timedelta(seconds=PROVIDER_COOLDOWN)
+            if datetime.now() > cooldown_end:
+                self.exhausted_at = None
+            else:
+                return False
+        return any(m.is_available() for m in self.models)
+
+    def get_next_model_and_key(self) -> Tuple[Optional[str], Optional[str]]:
+        """Get next available model and key for this provider."""
+        for _ in range(len(self.models)):
+            model = self.models[self.current_model_index]
+            self.current_model_index = (self.current_model_index + 1) % len(self.models)
+
+            key_state = model.get_next_key()
+            if key_state:
+                return model.model_id, key_state.key
+
+        # All models exhausted for this provider
+        self.exhausted_at = datetime.now()
+        return None, None
+
+
 class RiverModelCascade:
     """
-    Intelligent model + key rotation with cascading fallback.
+    Multi-provider cascade with intelligent fallback.
+
+    Provider cascade: Gemini → Grok → OpenRouter
+
+    Within each provider:
+    - Gemini: Multiple models with key rotation
+    - Grok: Single key, multiple models
+    - OpenRouter: Single key, free models
 
     Usage:
         cascade = RiverModelCascade()
-        model, key = cascade.get_next()
+        provider, model, key = cascade.get_next()
         # Use model with key
         # On success:
         cascade.mark_success()
@@ -128,20 +198,21 @@ class RiverModelCascade:
     """
 
     def __init__(self):
-        self.models: Dict[str, ModelState] = {}
-        self.current_model_index = 0
+        self.providers: Dict[str, ProviderState] = {}
+        self._last_used_provider: Optional[str] = None
         self._last_used_model: Optional[str] = None
         self._last_used_key: Optional[KeyState] = None
+        self._last_model_state: Optional[ModelState] = None
 
-        # Load API keys from environment
-        self._load_keys()
+        # Load all providers
+        self._load_gemini()
+        self._load_grok()
+        self._load_openrouter()
 
-        logger.info(f"RiverModelCascade initialized with {len(self.models)} models")
-        for model_id, state in self.models.items():
-            logger.info(f"  {model_id}: {len(state.keys)} keys")
+        self._log_status()
 
-    def _load_keys(self):
-        """Load API keys from environment."""
+    def _load_gemini(self):
+        """Load Gemini provider with key rotation."""
         keys = []
 
         # Load from various env var patterns
@@ -157,36 +228,91 @@ class RiverModelCascade:
                 if key and key not in keys:
                     keys.append(key)
 
+        if not keys:
+            logger.warning("No Gemini API keys found")
+            return
+
         # Create model states with all keys
-        for model_id in MODEL_CASCADE:
-            self.models[model_id] = ModelState(
+        models = []
+        for model_id in GEMINI_MODEL_CASCADE:
+            models.append(ModelState(
                 model_id=model_id,
                 keys=[KeyState(key=k) for k in keys]
-            )
+            ))
 
-    def get_next(self) -> Tuple[Optional[str], Optional[str]]:
+        self.providers["gemini"] = ProviderState(provider="gemini", models=models)
+        logger.info(f"Gemini: {len(keys)} keys × {len(models)} models")
+
+    def _load_grok(self):
+        """Load Grok/xAI provider."""
+        key = os.getenv("XAI_API_KEY")
+        if not key:
+            logger.warning("No XAI_API_KEY found for Grok")
+            return
+
+        models = []
+        for model_id in GROK_MODEL_CASCADE:
+            models.append(ModelState(
+                model_id=model_id,
+                keys=[KeyState(key=key)]
+            ))
+
+        self.providers["grok"] = ProviderState(provider="grok", models=models)
+        logger.info(f"Grok: 1 key × {len(models)} models")
+
+    def _load_openrouter(self):
+        """Load OpenRouter with free models."""
+        key = os.getenv("OPENROUTER_API_KEY")
+        if not key:
+            logger.warning("No OPENROUTER_API_KEY found")
+            return
+
+        models = []
+        for model_id in OPENROUTER_FREE_MODELS:
+            models.append(ModelState(
+                model_id=model_id,
+                keys=[KeyState(key=key)]
+            ))
+
+        self.providers["openrouter"] = ProviderState(provider="openrouter", models=models)
+        logger.info(f"OpenRouter: 1 key × {len(models)} free models")
+
+    def _log_status(self):
+        """Log initialization status."""
+        total_models = sum(len(p.models) for p in self.providers.values())
+        logger.info(f"RiverModelCascade: {len(self.providers)} providers, {total_models} models")
+
+    def get_next(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
-        Get next available model and key.
+        Get next available provider, model, and key.
 
         Returns:
-            Tuple of (model_id, api_key) or (None, None) if all exhausted
+            Tuple of (provider, model_id, api_key) or (None, None, None) if all exhausted
         """
-        # Try each model in cascade order
-        for model_id in MODEL_CASCADE:
-            state = self.models.get(model_id)
-            if not state:
+        for provider_name in PROVIDER_CASCADE:
+            provider = self.providers.get(provider_name)
+            if not provider or not provider.is_available():
                 continue
 
-            key_state = state.get_next_key()
-            if key_state:
+            model_id, api_key = provider.get_next_model_and_key()
+            if model_id and api_key:
+                self._last_used_provider = provider_name
                 self._last_used_model = model_id
-                self._last_used_key = key_state
-                logger.debug(f"Using {model_id} with key ...{key_state.key[-8:]}")
-                return model_id, key_state.key
+                # Find the key state for marking
+                for m in provider.models:
+                    if m.model_id == model_id:
+                        self._last_model_state = m
+                        for ks in m.keys:
+                            if ks.key == api_key:
+                                self._last_used_key = ks
+                                break
+                        break
 
-        # All models exhausted
-        logger.warning("All models and keys exhausted!")
-        return None, None
+                logger.info(f"Cascade → {provider_name}/{model_id}")
+                return provider_name, model_id, api_key
+
+        logger.error("All providers exhausted!")
+        return None, None, None
 
     def mark_success(self):
         """Mark last used key as successful."""
@@ -197,37 +323,42 @@ class RiverModelCascade:
         """Mark last used key as exhausted (rate limited)."""
         if self._last_used_key:
             self._last_used_key.mark_exhausted()
-            logger.warning(f"Key exhausted for {self._last_used_model}: {error_msg[:100]}")
+            logger.warning(f"Exhausted: {self._last_used_provider}/{self._last_used_model}: {error_msg[:80]}")
 
     def get_status(self) -> Dict:
         """Get current cascade status."""
         status = {
-            "models": {},
-            "total_keys": 0,
-            "available_keys": 0,
-            "current_model": self._last_used_model
+            "providers": {},
+            "current_provider": self._last_used_provider,
+            "current_model": self._last_used_model,
         }
 
-        for model_id, state in self.models.items():
-            available = sum(1 for k in state.keys if k.is_available())
-            status["models"][model_id] = {
-                "total_keys": len(state.keys),
-                "available_keys": available,
-                "is_available": state.is_available()
+        for name, provider in self.providers.items():
+            models_status = {}
+            for model in provider.models:
+                available = sum(1 for k in model.keys if k.is_available())
+                models_status[model.model_id] = {
+                    "total_keys": len(model.keys),
+                    "available_keys": available,
+                }
+
+            status["providers"][name] = {
+                "is_available": provider.is_available(),
+                "models": models_status,
             }
-            status["total_keys"] += len(state.keys)
-            status["available_keys"] += available
 
         return status
 
     def reset(self):
-        """Reset all keys and models (clear exhaustion state)."""
-        for state in self.models.values():
-            state.all_keys_exhausted_at = None
-            for key in state.keys:
-                key.exhausted_at = None
-                key.error_count = 0
-        logger.info("Cascade reset - all keys available")
+        """Reset all providers, models, and keys."""
+        for provider in self.providers.values():
+            provider.exhausted_at = None
+            for model in provider.models:
+                model.all_keys_exhausted_at = None
+                for key in model.keys:
+                    key.exhausted_at = None
+                    key.error_count = 0
+        logger.info("Cascade reset - all providers available")
 
 
 # Singleton instance
@@ -243,9 +374,15 @@ def get_cascade() -> RiverModelCascade:
 
 
 # Convenience functions
-def get_model_and_key() -> Tuple[Optional[str], Optional[str]]:
-    """Get next available model and key."""
+def get_provider_model_and_key() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Get next available provider, model, and key."""
     return get_cascade().get_next()
+
+
+def get_model_and_key() -> Tuple[Optional[str], Optional[str]]:
+    """Get next available model and key (backward compatible)."""
+    _, model, key = get_cascade().get_next()
+    return model, key
 
 
 def mark_success():
@@ -275,6 +412,6 @@ if __name__ == "__main__":
 
     # Simulate getting models
     for i in range(5):
-        model, key = cascade.get_next()
-        print(f"Got: {model} with key ...{key[-8:] if key else 'None'}")
+        provider, model, key = cascade.get_next()
+        print(f"Got: {provider}/{model} with key ...{key[-8:] if key else 'None'}")
         cascade.mark_success()

@@ -49,13 +49,12 @@ class RiverSettings:
         },
         "proactive_enabled": True,
         # Model settings with cascade fallback
-        "chat_model": "gemini-3-pro-preview",  # Primary: Deep thinking
-        "chat_model_fallback": "gemini-3-flash-preview",  # Secondary: Fast
+        "chat_model": "gemini-3-flash-preview",  # Primary: Fast Gemini 3 Flash
+        "chat_model_fallback": "gemini-2.5-flash",  # Secondary: Reliable 2.5
         "model_cascade": [  # Full cascade order (auto-fallback on quota)
-            "gemini-3-pro-preview",
-            "gemini-2.5-pro",
             "gemini-3-flash-preview",
             "gemini-2.5-flash",
+            "gemini-3-flash-preview",
             "gemini-2.0-flash"
         ],
         "image_model": "gemini-2.5-flash-image",  # Default: Nano Banana

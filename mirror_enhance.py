@@ -77,9 +77,26 @@ class MirrorEnhance:
     Works alongside existing mirror_api.py without modifying it.
     """
 
-    def __init__(self):
+    def __init__(self, use_free_models: bool = True):
         self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        self.openai = OpenAI(api_key=OPENAI_API_KEY)
+        self.use_free_models = use_free_models
+
+        # Try free models first (saves OpenAI quota)
+        self.free_client = None
+        if use_free_models:
+            try:
+                from river_free_models import get_free_client
+                self.free_client = get_free_client()
+                logger.info("MirrorEnhance using FREE models for extraction")
+            except ImportError:
+                logger.warning("Free models not available, falling back to OpenAI")
+                self.use_free_models = False
+
+        # Fallback to OpenAI
+        if not self.use_free_models or not self.free_client:
+            self.openai = OpenAI(api_key=OPENAI_API_KEY)
+        else:
+            self.openai = None
 
         # Decay parameters
         self.decay_half_life_days = 30  # Memories lose half relevance in 30 days
@@ -135,16 +152,34 @@ If nothing worth extracting, return empty array: []
 """
 
         try:
-            response = self.openai.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You extract key memories from conversations. Return only valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
-
-            data = json.loads(response.choices[0].message.content)
+            # Use free models when available
+            if self.free_client and self.use_free_models:
+                raw_response = self.free_client.extract(
+                    text=prompt,
+                    instruction="You extract key memories from conversations. Return only valid JSON array."
+                )
+                # Parse JSON from response
+                if raw_response:
+                    # Find JSON in response
+                    import re
+                    json_match = re.search(r'\[.*\]', raw_response, re.DOTALL)
+                    if json_match:
+                        data = json.loads(json_match.group())
+                    else:
+                        data = json.loads(raw_response)
+                else:
+                    data = []
+            else:
+                # Fallback to OpenAI
+                response = self.openai.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You extract key memories from conversations. Return only valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"}
+                )
+                data = json.loads(response.choices[0].message.content)
             memories_data = data.get("memories", data) if isinstance(data, dict) else data
 
             if not isinstance(memories_data, list):

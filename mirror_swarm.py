@@ -25,7 +25,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Swarm Configuration - Updated Jan 2026
-GROK_REASONING_MODEL = "x-ai/grok-4.1-fast-reasoning"  # Grok 4.1 - reasoning-first with tool-use
+MIMO_REASONING_MODEL = "xiaomi/mimo-v2-flash:free"  # MiMo V2 Flash - Top tier reasoning (free)
 GROK_CODE_MODEL = "x-ai/grok-code-fast-1"  # Grok 4.1 - lightning fast reasoning for agentic coding
 MAX_CONTRIBUTION_TOKENS = 1500  # Context gate
 
@@ -46,7 +46,7 @@ class MirrorSwarm:
         return text[:MAX_CONTRIBUTION_TOKENS]
 
     async def run_worker(self, worker_id: int, task: str, sub_context: str, lessons: str = "") -> Dict:
-        """Asynchronous Grok Worker Agent"""
+        """Asynchronous MiMo Worker Agent"""
         print(f"🐝 [Worker {worker_id}] Exploring: {sub_context}")
         
         # Plasticity Gate: Deduplicate concepts
@@ -55,7 +55,7 @@ class MirrorSwarm:
         self.concept_registry.add(sub_context)
         
         system_msg = (
-            "You are a Grok Swarm Worker. Generate focused technical insights on ONE aspect. "
+            "You are a MiMo Swarm Worker. Generate focused technical insights on ONE aspect. "
             "Format: ### [Topic]\\n<concise insights>\\n\\n"
         )
         if lessons:
@@ -63,7 +63,7 @@ class MirrorSwarm:
 
         try:
             response = await self.client.chat.completions.create(  # Async call
-                model=GROK_REASONING_MODEL,
+                model=MIMO_REASONING_MODEL,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": f"Task: {task}\\nFocus: {sub_context}\\nContribution:"}
@@ -122,8 +122,8 @@ class MirrorSwarm:
             return {"id": agent_id, "context": sub_context, "error": str(e)}
 
     async def synthesize(self, task: str, worker_results: List[Dict]) -> str:
-        """Qwen Synthesis with context gating"""
-        print("🏗️ [Architect] Synthesizing with Qwen...")
+        """Grok Synthesis with context gating"""
+        print("🏗️ [Architect] Synthesizing with Grok 4.1 Code...")
         
         contributions = []
         for r in worker_results:

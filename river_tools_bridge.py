@@ -505,6 +505,44 @@ class RiverToolsBridge:
         except Exception as e:
             return {"success": False, "path": path, "error": str(e)}
 
+    # === User Management ===
+
+    async def register_user(self, email: str, password: str = None) -> Dict[str, Any]:
+        """Register a new user in the Mumega system."""
+        try:
+            # Generate a secure password if none provided
+            if not password:
+                import secrets
+                import string
+                password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
+
+            # Direct Supabase call for registration
+            from supabase import create_client
+            url = os.getenv("SUPABASE_URL")
+            key = os.getenv("SUPABASE_API_KEY")
+            supabase = create_client(url, key)
+
+            # Register via Supabase Auth
+            response = supabase.auth.sign_up({
+                "email": email,
+                "password": password,
+            })
+
+            if response.user:
+                return {
+                    "success": True,
+                    "user_id": response.user.id,
+                    "email": email,
+                    "message": "User registered successfully. Confirmation email sent.",
+                    "temp_password": password if not password else "provided"
+                }
+            else:
+                return {"success": False, "error": "Registration failed"}
+
+        except Exception as e:
+            logger.error(f"Registration error: {e}")
+            return {"success": False, "error": str(e)}
+
     # === Use any tool from river_engine ===
 
     async def call_tool(self, tool_name: str, **kwargs) -> Dict[str, Any]:

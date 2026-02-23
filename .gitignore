@@ -11,3 +11,5 @@ engrams/
 *.log
 agents/
 data/
+gateway-worker/
+fix_river_model_*.py
