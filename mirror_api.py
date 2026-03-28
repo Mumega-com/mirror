@@ -59,6 +59,7 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = 5
     agent_filter: Optional[str] = None  # Filter by agent: "river", "knight", "oracle"
+    project: Optional[str] = None  # Filter by project slug: "gaf", "mirror", "torivers"
     threshold: float = 0.5
 
 
@@ -66,6 +67,7 @@ class EngramStoreRequest(BaseModel):
     agent: str  # "river", "knight", "oracle"
     context_id: str
     text: str
+    project: Optional[str] = None  # Project slug for scoping
     epistemic_truths: List[str] = []
     core_concepts: List[str] = []
     affective_vibe: str = "Neutral"
@@ -78,6 +80,7 @@ class EngramResponse(BaseModel):
     id: str
     context_id: str
     series: str
+    project: Optional[str] = None
     similarity: Optional[float] = None
     epistemic_truths: List[str]
     core_concepts: List[str]
@@ -110,6 +113,11 @@ def agent_to_series(agent: str) -> str:
     }
     return mapping.get(agent.lower(), f"{agent.title()} - Agent Memory")
 
+
+# --- TASK SYSTEM ---
+from task_router import router as task_router, init as task_init
+task_init(supabase, openai_client)
+app.include_router(task_router)
 
 # --- API ENDPOINTS ---
 
@@ -185,13 +193,14 @@ async def search_memory(request: SearchRequest) -> List[EngramResponse]:
         # Generate query embedding
         query_embedding = get_embedding(request.query)
 
-        # Search using Mirror's match function
+        # Search using Mirror's match function (v2 supports project filtering)
         response = supabase.rpc(
-            "mirror_match_engrams",
+            "mirror_match_engrams_v2",
             {
                 "query_embedding": query_embedding,
                 "match_threshold": request.threshold,
-                "match_count": request.top_k * 2  # Get more, filter later
+                "match_count": request.top_k * 2,  # Get more, filter later
+                "filter_project": request.project
             }
         ).execute()
 
@@ -207,6 +216,7 @@ async def search_memory(request: SearchRequest) -> List[EngramResponse]:
                 id=row.get("id"),
                 context_id=row.get("context_id"),
                 series=row.get("series"),
+                project=row.get("project"),
                 similarity=row.get("similarity"),
                 epistemic_truths=row.get("epistemic_truths", []),
                 core_concepts=row.get("core_concepts", []),
@@ -251,6 +261,7 @@ async def store_engram(request: EngramStoreRequest):
             "context_id": request.context_id,
             "timestamp": datetime.utcnow().isoformat(),
             "series": agent_to_series(request.agent),
+            "project": request.project,
             "epistemic_truths": request.epistemic_truths,
             "core_concepts": request.core_concepts,
             "affective_vibe": request.affective_vibe,
@@ -259,6 +270,7 @@ async def store_engram(request: EngramStoreRequest):
             "raw_data": {
                 "agent": request.agent,
                 "text": request.text,
+                "project": request.project,
                 "metadata": request.metadata
             },
             "embedding": embedding
@@ -283,24 +295,28 @@ async def store_engram(request: EngramStoreRequest):
 
 
 @app.get("/recent/{agent}")
-async def get_recent_engrams(agent: str, limit: int = 10):
+async def get_recent_engrams(agent: str, limit: int = 10, project: Optional[str] = None):
     """
-    Get recent engrams from a specific agent
+    Get recent engrams from a specific agent, optionally filtered by project
 
-    Example: GET /recent/river?limit=5
+    Example: GET /recent/river?limit=5&project=gaf
     """
     try:
-        series_filter = agent_to_series(agent)
-
-        response = supabase.table("mirror_engrams")\
+        query = supabase.table("mirror_engrams")\
             .select("*")\
-            .ilike("series", f"%{agent}%")\
+            .ilike("series", f"%{agent}%")
+
+        if project:
+            query = query.eq("project", project)
+
+        response = query\
             .order("timestamp", desc=True)\
             .limit(limit)\
             .execute()
 
         return {
             "agent": agent,
+            "project": project,
             "count": len(response.data),
             "engrams": response.data
         }
