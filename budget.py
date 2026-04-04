@@ -23,14 +23,14 @@ from dotenv import load_dotenv
 # ---------------------------------------------------------------------------
 # Env
 # ---------------------------------------------------------------------------
-load_dotenv("/home/mumega/resident-cms/.env")
+load_dotenv("/home/mumega/.env.secrets")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_API_KEY", "")  # service role key
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise EnvironmentError(
-        "SUPABASE_URL and SUPABASE_API_KEY must be set in /home/mumega/resident-cms/.env"
+        "SUPABASE_URL and SUPABASE_API_KEY must be set in /home/mumega/.env.secrets"
     )
 
 from supabase import create_client, Client  # noqa: E402

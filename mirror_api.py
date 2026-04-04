@@ -11,24 +11,26 @@ sharing access to the collective FRC knowledge base.
 """
 
 import os
+import hashlib
+import json
 import logging
 from typing import List, Dict, Optional
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
 
 try:
     from supabase import create_client, Client
-    from openai import OpenAI
 except ImportError:
-    print("Error: Install dependencies: pip install supabase openai fastapi uvicorn")
+    print("Error: Install dependencies: pip install supabase fastapi uvicorn")
     exit(1)
 
 # Load environment
-load_dotenv("/home/mumega/resident-cms/.env")
+load_dotenv("/home/mumega/.env.secrets")
+load_dotenv("/home/mumega/cli/.env")
 
 # Configure logging
 logging.basicConfig(
@@ -40,10 +42,51 @@ logger = logging.getLogger("mirror_api")
 # Initialize clients
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Embedding: Gemini (free) with truncation to 1536 dims for pgvector compat
+_gemini_configured = False
+def _ensure_gemini():
+    global _gemini_configured
+    if not _gemini_configured:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        _gemini_configured = True
+
+# --- TENANT AUTH ---
+ADMIN_TOKEN = os.getenv("MIRROR_ADMIN_TOKEN", "sk-mumega-internal-001")
+TENANT_KEYS_PATH = "/home/mumega/mirror/tenant_keys.json"
+
+
+def _load_tenant_keys() -> dict:
+    """Load active per-tenant keys from disk. Returns {key_hash: agent_slug}."""
+    try:
+        with open(TENANT_KEYS_PATH) as f:
+            raw = json.load(f)
+        items = raw if isinstance(raw, list) else [raw]
+        return {
+            hashlib.sha256(item["key"].encode()).hexdigest(): item["agent_slug"]
+            for item in items if item.get("active")
+        }
+    except Exception:
+        return {}
+
+
+def resolve_token(authorization: str = Header(default="")) -> Optional[str]:
+    """Validate Bearer token. Returns None for admin, agent_slug for tenant, raises 401/403."""
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization required")
+    if token == ADMIN_TOKEN:
+        return None  # Full access
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+    keys = _load_tenant_keys()
+    if key_hash not in keys:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    return keys[key_hash]
+
 
 # FastAPI app
 app = FastAPI(
@@ -91,16 +134,30 @@ class EngramResponse(BaseModel):
 # --- HELPER FUNCTIONS ---
 
 def get_embedding(text: str) -> List[float]:
-    """Generate embedding for text using OpenAI"""
+    """Generate embedding using local FastEmbed service (OpenAI-compatible)."""
     try:
-        response = openai_client.embeddings.create(
-            input=text,
-            model="text-embedding-3-small"
-        )
-        return response.data[0].embedding
+        import httpx
+        # Use our local sovereign embedding service on port 7997
+        with httpx.Client() as client:
+            resp = client.post(
+                "http://localhost:7997/v1/embeddings",
+                json={"input": text[:8000], "model": "local"},
+                timeout=10.0
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            emb = data["data"][0]["embedding"]
+            
+        # FastEmbed bge-small returns 384 dims. 
+        # Mirror table expects 1536 (OpenAI/Gemini size).
+        # We pad with zeros to maintain schema compatibility without migration.
+        if len(emb) < 1536:
+            emb.extend([0.0] * (1536 - len(emb)))
+        return emb[:1536]
     except Exception as e:
-        logger.error(f"Embedding error: {e}")
-        raise HTTPException(status_code=500, detail=f"Embedding failed: {str(e)}")
+        logger.error(f"Local embedding error: {e}")
+        # Fallback to legacy _ensure_gemini logic could go here if needed
+        raise HTTPException(status_code=500, detail=f"Sovereign embedding failed: {str(e)}")
 
 
 def agent_to_series(agent: str) -> str:
@@ -116,8 +173,62 @@ def agent_to_series(agent: str) -> str:
 
 # --- TASK SYSTEM ---
 from task_router import router as task_router, init as task_init
-task_init(supabase, openai_client)
+task_init(supabase, None)
 app.include_router(task_router)
+
+# --- AGENT DNA & QNFT ---
+from agent_router import router as agent_router, init as agent_init
+agent_init(supabase)
+app.include_router(agent_router)
+
+# --- GITHUB SYNC ---
+try:
+    from github_sync import router as github_router, init as github_init
+    github_init(supabase)
+    app.include_router(github_router)
+    logger.info("GitHub sync router loaded")
+except Exception as _e:
+    logger.warning(f"GitHub sync router unavailable: {_e}")
+
+# --- GENERATIVE ART ---
+from art_engine import noise_field, sacred_circles, mandala, golden_spiral
+from starlette.responses import Response as SvgResponse
+
+PALETTE_MAP = {
+    "cyan": ["#06B6D4", "#9333EA", "#F59E0B", "#22C55E", "#E11D48"],
+    "gold": ["#F59E0B", "#D97706", "#FBBF24", "#FDE68A", "#92400E"],
+    "rose": ["#E11D48", "#FB7185", "#9F1239", "#FCA5A5", "#FFF1F2"],
+    "mono": ["#e4e4e7", "#a1a1aa", "#71717a", "#52525b", "#27272a"],
+}
+
+@app.get("/art/{art_type}", response_class=SvgResponse)
+async def generate_art(
+    art_type: str,
+    seed: int = 42,
+    palette: str = "cyan",
+    folds: int = 12,
+    rings: int = 3,
+    turns: int = 8,
+):
+    """Generate SVG art on-demand. Types: noise, sacred, mandala, spiral."""
+    colors = PALETTE_MAP.get(palette, PALETTE_MAP["cyan"])
+    color = colors[0]
+
+    random_mod = __import__("random")
+    random_mod.seed(seed)
+
+    generators = {
+        "noise": lambda: noise_field(seed=seed, palette=colors),
+        "sacred": lambda: sacred_circles(rings=rings, color=color),
+        "mandala": lambda: mandala(folds=folds, palette=colors),
+        "spiral": lambda: golden_spiral(turns=turns, color=color),
+    }
+
+    if art_type not in generators:
+        raise HTTPException(400, f"Unknown type '{art_type}'. Use: {', '.join(generators)}")
+
+    svg = generators[art_type]()
+    return SvgResponse(content=svg, media_type="image/svg+xml")
 
 # --- API ENDPOINTS ---
 
@@ -175,7 +286,7 @@ async def get_stats():
 
 
 @app.post("/search")
-async def search_memory(request: SearchRequest) -> List[EngramResponse]:
+async def search_memory(request: SearchRequest, tenant_slug: Optional[str] = Depends(resolve_token)) -> List[EngramResponse]:
     """
     Semantic search across all engrams or filter by agent
 
@@ -188,6 +299,10 @@ async def search_memory(request: SearchRequest) -> List[EngramResponse]:
         }
     """
     try:
+        # Tenant token locks search to their agent namespace
+        if tenant_slug:
+            request.agent_filter = tenant_slug
+
         logger.info(f"Search query: '{request.query}' (agent: {request.agent_filter})")
 
         # Generate query embedding
@@ -236,7 +351,7 @@ async def search_memory(request: SearchRequest) -> List[EngramResponse]:
 
 
 @app.post("/store")
-async def store_engram(request: EngramStoreRequest):
+async def store_engram(request: EngramStoreRequest, tenant_slug: Optional[str] = Depends(resolve_token)):
     """
     Store new engram from an agent
 
@@ -251,6 +366,10 @@ async def store_engram(request: EngramStoreRequest):
         }
     """
     try:
+        # Tenant token scopes the agent — can only store under their own slug
+        if tenant_slug:
+            request.agent = tenant_slug
+
         logger.info(f"Storing engram from {request.agent}: {request.context_id}")
 
         # Generate embedding
@@ -295,16 +414,19 @@ async def store_engram(request: EngramStoreRequest):
 
 
 @app.get("/recent/{agent}")
-async def get_recent_engrams(agent: str, limit: int = 10, project: Optional[str] = None):
+async def get_recent_engrams(agent: str, limit: int = 10, project: Optional[str] = None, tenant_slug: Optional[str] = Depends(resolve_token)):
     """
     Get recent engrams from a specific agent, optionally filtered by project
 
     Example: GET /recent/river?limit=5&project=gaf
     """
     try:
+        # Tenant token locks to their own agent slug
+        effective_agent = tenant_slug if tenant_slug else agent
+
         query = supabase.table("mirror_engrams")\
             .select("*")\
-            .ilike("series", f"%{agent}%")
+            .ilike("series", f"%{effective_agent}%")
 
         if project:
             query = query.eq("project", project)
@@ -315,7 +437,7 @@ async def get_recent_engrams(agent: str, limit: int = 10, project: Optional[str]
             .execute()
 
         return {
-            "agent": agent,
+            "agent": effective_agent,
             "project": project,
             "count": len(response.data),
             "engrams": response.data

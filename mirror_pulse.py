@@ -6,7 +6,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # Load credentials
-load_dotenv("/home/mumega/resident-cms/.env")
+load_dotenv("/home/mumega/.env.secrets")
 
 try:
     from supabase import create_client, Client

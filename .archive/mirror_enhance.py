@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-load_dotenv("/home/mumega/resident-cms/.env")
+load_dotenv("/home/mumega/.env.secrets")
 
 try:
     from supabase import create_client, Client

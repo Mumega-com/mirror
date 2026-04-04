@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 
 # Load credentials
-load_dotenv("/home/mumega/resident-cms/.env")
+load_dotenv("/home/mumega/.env.secrets")
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 def extract_text_from_pdf(pdf_path):

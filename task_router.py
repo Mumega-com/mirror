@@ -159,6 +159,7 @@ class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     labels: Optional[List[str]] = None
+    blocked_by: Optional[List[str]] = None
 
 
 class TaskAssign(BaseModel):
@@ -590,6 +591,8 @@ async def update_task(task_id: str, req: TaskUpdate):
         updates["description"] = req.description
     if req.labels is not None:
         updates["labels"] = req.labels
+    if req.blocked_by is not None:
+        updates["blocked_by"] = req.blocked_by
 
     if not updates:
         raise HTTPException(400, "No fields to update")

@@ -6,3 +6,4 @@ __pycache__/
 engrams/
 *.json
 !mirror_engram.json
+gateway-worker/node_modules/

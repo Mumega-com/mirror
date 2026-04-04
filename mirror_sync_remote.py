@@ -8,7 +8,7 @@ from typing import List, Dict
 from dotenv import load_dotenv
 
 # Load credentials from the master .env
-load_dotenv("/home/mumega/resident-cms/.env")
+load_dotenv("/home/mumega/.env.secrets")
 
 # Note: You will need to install these:
 # pip install supabase openai-python

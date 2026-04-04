@@ -5,7 +5,7 @@ import argparse
 from dotenv import load_dotenv
 
 # Load credentials from the master .env
-load_dotenv("/home/mumega/resident-cms/.env")
+load_dotenv("/home/mumega/.env.secrets")
 
 try:
     from supabase import create_client, Client

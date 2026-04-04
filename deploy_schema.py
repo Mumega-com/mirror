@@ -4,7 +4,7 @@ import psycopg2
 from dotenv import load_dotenv
 
 # Load credentials
-load_dotenv("/home/mumega/resident-cms/.env")
+load_dotenv("/home/mumega/.env.secrets")
 
 DB_URL = os.environ.get("SUPABASE_CONNECTION_STRING")
 SCHEMA_PATH = "/home/mumega/mirror/schema.sql"

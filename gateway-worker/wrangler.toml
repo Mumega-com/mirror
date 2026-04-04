@@ -1,0 +1,30 @@
+name = "mcp-gateway"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+workers_dev = true
+
+[[routes]]
+pattern = "gateway.mumega.com/*"
+zone_id = "6be08912cb8df272ae145c29f94be71a"
+
+# No vars needed - pure Cloudflare storage
+# River lives separately (SOS Engine at mumega.com/mirror)
+
+# Cloudflare Vectorize - vector embeddings
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "sos-engrams"
+
+# Cloudflare D1 - engram metadata
+[[d1_databases]]
+binding = "DB"
+database_name = "sos-mirror"
+database_id = "22dd92e3-b965-4c97-b1e9-f961ff0aa76d"
+
+# Cloudflare KV - session cache, real-time state
+[[kv_namespaces]]
+binding = "KV"
+id = "6b99b3f3c1464fb7ac8686bdb4930600"
+
+# Secrets (set via wrangler secret put):
+# OPENAI_API_KEY (for embeddings)
