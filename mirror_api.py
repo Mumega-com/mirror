@@ -47,13 +47,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Embedding: Gemini (free) with truncation to 1536 dims for pgvector compat
-_gemini_configured = False
-def _ensure_gemini():
-    global _gemini_configured
-    if not _gemini_configured:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        _gemini_configured = True
 
 # --- TENANT AUTH ---
 ADMIN_TOKEN = os.getenv("MIRROR_ADMIN_TOKEN", "sk-mumega-internal-001")
@@ -134,30 +127,21 @@ class EngramResponse(BaseModel):
 # --- HELPER FUNCTIONS ---
 
 def get_embedding(text: str) -> List[float]:
-    """Generate embedding using local FastEmbed service (OpenAI-compatible)."""
+    """Generate embedding using Gemini Embedding API (free)."""
     try:
-        import httpx
-        # Use our local sovereign embedding service on port 7997
-        with httpx.Client() as client:
-            resp = client.post(
-                "http://localhost:7997/v1/embeddings",
-                json={"input": text[:8000], "model": "local"},
-                timeout=10.0
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            emb = data["data"][0]["embedding"]
-            
-        # FastEmbed bge-small returns 384 dims. 
-        # Mirror table expects 1536 (OpenAI/Gemini size).
-        # We pad with zeros to maintain schema compatibility without migration.
-        if len(emb) < 1536:
-            emb.extend([0.0] * (1536 - len(emb)))
+        from google import genai
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
+        result = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text[:8000],
+        )
+        emb = list(result.embeddings[0].values)
+        # Gemini returns 3072 dims. Mirror table expects 1536.
+        # Truncate to fit pgvector column. First N dims carry most signal.
         return emb[:1536]
     except Exception as e:
-        logger.error(f"Local embedding error: {e}")
-        # Fallback to legacy _ensure_gemini logic could go here if needed
-        raise HTTPException(status_code=500, detail=f"Sovereign embedding failed: {str(e)}")
+        logger.error(f"Gemini embedding error: {e}")
+        raise HTTPException(status_code=500, detail=f"Embedding failed: {str(e)}")
 
 
 def agent_to_series(agent: str) -> str:

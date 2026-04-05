@@ -47,14 +47,18 @@ AGENTS = {
 def get_unblocked_tasks() -> List[Dict]:
     """Get backlog tasks that aren't blocked."""
     try:
-        resp = requests.get(f"{MIRROR_URL}/tasks", params={"status": "backlog"}, timeout=5)
+        resp = requests.get(f"{MIRROR_URL}/tasks", timeout=5)
         if resp.status_code != 200:
             return []
-        tasks = resp.json().get("tasks", [])
-        
+        raw = resp.json()
+        tasks = raw.get("tasks", []) if isinstance(raw, dict) else raw
+
+        # STRICT filter: only backlog tasks (not done, not blocked, not in_progress, not canceled)
+        backlog = [t for t in tasks if t.get("status") == "backlog"]
+
         # Filter unblocked
         unblocked = []
-        for t in tasks:
+        for t in backlog:
             blocked_by = t.get("blocked_by") or []
             if not blocked_by:
                 unblocked.append(t)
@@ -187,11 +191,10 @@ def run_dispatch_cycle():
             logger.info(f"{agent_id}: busy (not at prompt), skipping")
             continue
         
-        # Find task for this agent
+        # Find task for this agent — only tasks explicitly assigned to them
         for task in tasks:
             task_agent = task.get("agent", "")
-            # Task assigned to this agent, or unassigned
-            if task_agent == agent_id or task_agent == "athena":
+            if task_agent == agent_id:
                 if send_task_to_agent(agent_id, task):
                     tasks.remove(task)
                     break
