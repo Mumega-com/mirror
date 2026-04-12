@@ -22,15 +22,10 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
 
-try:
-    from supabase import create_client, Client
-except ImportError:
-    print("Error: Install dependencies: pip install supabase fastapi uvicorn")
-    exit(1)
-
-# Load environment
+# Load environment — mirror/.env is authoritative for this service (override=True)
 load_dotenv("/home/mumega/.env.secrets")
 load_dotenv("/home/mumega/cli/.env")
+load_dotenv("/home/mumega/mirror/.env", override=True)
 
 # Configure logging
 logging.basicConfig(
@@ -39,12 +34,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mirror_api")
 
-# Initialize clients
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+from db import get_db
+db = get_db()
+
+# Supabase passthrough for routers that still use the .table() interface
+supabase = db if hasattr(db, "table") else None
 
 # Embedding: Gemini (free) with truncation to 1536 dims for pgvector compat
 
@@ -122,6 +118,7 @@ class EngramResponse(BaseModel):
     core_concepts: List[str]
     affective_vibe: str
     timestamp: str
+    text: str = ""
 
 
 # --- HELPER FUNCTIONS ---
@@ -173,6 +170,12 @@ try:
     logger.info("GitHub sync router loaded")
 except Exception as _e:
     logger.warning(f"GitHub sync router unavailable: {_e}")
+
+# --- CODE GRAPH ---
+from code_router import router as code_router, init as code_init
+code_init(db, get_embedding)
+app.include_router(code_router)
+logger.info("Code graph router loaded (/code/search, /code/stats, /code/sync)")
 
 # --- GENERATIVE ART ---
 from art_engine import noise_field, sacred_circles, mandala, golden_spiral
@@ -231,37 +234,13 @@ async def root():
 async def get_stats():
     """Get memory statistics"""
     try:
-        # Total engrams
-        total = supabase.table("mirror_engrams").select("id", count="exact").execute()
-
-        # Count by series (approximate agent distribution)
-        river_count = supabase.table("mirror_engrams")\
-            .select("id", count="exact")\
-            .ilike("series", "%River%")\
-            .execute()
-
-        knight_count = supabase.table("mirror_engrams")\
-            .select("id", count="exact")\
-            .ilike("series", "%Knight%")\
-            .execute()
-
-        oracle_count = supabase.table("mirror_engrams")\
-            .select("id", count="exact")\
-            .ilike("series", "%Oracle%")\
-            .execute()
-
-        frc_count = supabase.table("mirror_engrams")\
-            .select("id", count="exact")\
-            .or_("series.ilike.%FRC%,series.ilike.%Fractal%,series.ilike.%821%")\
-            .execute()
-
         return {
-            "total_engrams": total.count,
+            "total_engrams": db.count_engrams(),
             "by_agent": {
-                "river": river_count.count,
-                "knight": knight_count.count,
-                "oracle": oracle_count.count,
-                "frc_corpus": frc_count.count
+                "river": db.count_engrams("River"),
+                "knight": db.count_engrams("Knight"),
+                "oracle": db.count_engrams("Oracle"),
+                "frc_corpus": db.count_engrams("FRC"),
             }
         }
     except Exception as e:
@@ -292,24 +271,24 @@ async def search_memory(request: SearchRequest, tenant_slug: Optional[str] = Dep
         # Generate query embedding
         query_embedding = get_embedding(request.query)
 
-        # Search using Mirror's match function (v2 supports project filtering)
-        response = supabase.rpc(
-            "mirror_match_engrams_v2",
-            {
-                "query_embedding": query_embedding,
-                "match_threshold": request.threshold,
-                "match_count": request.top_k * 2,  # Get more, filter later
-                "filter_project": request.project
-            }
-        ).execute()
+        rows = db.search_engrams(
+            embedding=query_embedding,
+            threshold=request.threshold,
+            limit=request.top_k * 2,
+            project=request.project,
+        )
 
         results = []
-        for row in response.data:
+        for row in rows:
             # Filter by agent if requested
             if request.agent_filter:
                 agent_series = agent_to_series(request.agent_filter)
                 if agent_series not in row.get("series", ""):
                     continue
+
+            # Extract text from raw_data (pgvector stores content there)
+            raw_data = row.get("raw_data") or {}
+            text = raw_data.get("text", "") if isinstance(raw_data, dict) else ""
 
             results.append(EngramResponse(
                 id=row.get("id"),
@@ -320,7 +299,8 @@ async def search_memory(request: SearchRequest, tenant_slug: Optional[str] = Dep
                 epistemic_truths=row.get("epistemic_truths", []),
                 core_concepts=row.get("core_concepts", []),
                 affective_vibe=row.get("affective_vibe", "Unknown"),
-                timestamp=row.get("timestamp", "")
+                timestamp=row.get("ts") or row.get("timestamp", ""),
+                text=text,
             ))
 
             if len(results) >= request.top_k:
@@ -379,11 +359,7 @@ async def store_engram(request: EngramStoreRequest, tenant_slug: Optional[str] =
             "embedding": embedding
         }
 
-        # Upsert to Supabase
-        result = supabase.table("mirror_engrams").upsert(
-            data,
-            on_conflict="context_id"
-        ).execute()
+        db.upsert_engram(data)
 
         logger.info(f"Stored engram: {request.context_id}")
         return {
@@ -408,23 +384,12 @@ async def get_recent_engrams(agent: str, limit: int = 10, project: Optional[str]
         # Tenant token locks to their own agent slug
         effective_agent = tenant_slug if tenant_slug else agent
 
-        query = supabase.table("mirror_engrams")\
-            .select("*")\
-            .ilike("series", f"%{effective_agent}%")
-
-        if project:
-            query = query.eq("project", project)
-
-        response = query\
-            .order("timestamp", desc=True)\
-            .limit(limit)\
-            .execute()
-
+        engrams = db.recent_engrams(effective_agent, limit=limit, project=project)
         return {
             "agent": effective_agent,
             "project": project,
-            "count": len(response.data),
-            "engrams": response.data
+            "count": len(engrams),
+            "engrams": engrams,
         }
 
     except Exception as e:
@@ -629,7 +594,7 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("MIRROR - Cognitive Memory API")
     logger.info("=" * 60)
-    logger.info(f"Supabase: {SUPABASE_URL}")
+    logger.info(f"Backend: {os.getenv('MIRROR_BACKEND', 'local')}")
     logger.info(f"Agents: River, Knight, Oracle")
     logger.info(f"Enhanced Features: {'ENABLED' if ENHANCE_AVAILABLE else 'DISABLED'}")
     logger.info("=" * 60)

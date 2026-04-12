@@ -7,3 +7,8 @@ engrams/
 *.json
 !mirror_engram.json
 gateway-worker/node_modules/
+# Added by code-review-graph
+.code-review-graph/
+tenant_keys.json
+mirror_code_sync.py.bak
+/tmp/
