@@ -81,6 +81,17 @@ def _init_redis():
         return
     try:
         url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        password = os.getenv("REDIS_PASSWORD")
+        if password and "@" not in url:
+            # If password is provided but not in the URL, inject it
+            from urllib.parse import urlparse, urlunparse
+            p = urlparse(url)
+            # Use netloc to inject password: :password@host:port
+            netloc = f":{password}@{p.hostname}"
+            if p.port:
+                netloc += f":{p.port}"
+            url = urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
+        
         _redis = sync_redis.from_url(url, decode_responses=True)
         _redis.ping()
         logger.info(f"Redis connected for task notifications")

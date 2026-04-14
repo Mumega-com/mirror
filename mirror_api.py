@@ -14,7 +14,7 @@ import os
 import hashlib
 import json
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -117,7 +117,7 @@ class EngramResponse(BaseModel):
     epistemic_truths: List[str]
     core_concepts: List[str]
     affective_vibe: str
-    timestamp: str
+    timestamp: Union[datetime, str]
     text: str = ""
 
 

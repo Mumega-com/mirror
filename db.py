@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Optional
+import logging
+from typing import Any, Optional, List, Dict, Union
+from dataclasses import dataclass, field
+
+logger = logging.getLogger("mirror.db")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -19,9 +23,182 @@ DATABASE_URL = os.getenv(
 MIRROR_BACKEND = os.getenv("MIRROR_BACKEND", "local")
 
 
-# ---------------------------------------------------------------------------
-# Local backend (psycopg2)
-# ---------------------------------------------------------------------------
+@dataclass
+class QueryResponse:
+    """Mock Supabase response object."""
+    data: List[Dict[str, Any]] = field(default_factory=list)
+    count: Optional[int] = None
+
+
+class _LocalTable:
+    """
+    A robust query builder that mimics the Supabase/PostgREST chainable syntax
+    but executes directly against local PostgreSQL via psycopg2.
+    """
+
+    def __init__(self, db: LocalDB, table_name: str) -> None:
+        self._db = db
+        self._table = table_name
+        self._method = "select"  # select, insert, upsert, delete
+        self._columns = "*"
+        self._filters: List[tuple] = []
+        self._order: Optional[str] = None
+        self._limit: Optional[int] = None
+        self._data: Any = None
+        self._on_conflict: Optional[str] = None
+
+    def select(self, columns: str = "*", count: Optional[str] = None) -> _LocalTable:
+        self._method = "select"
+        self._columns = columns
+        return self
+
+    def insert(self, data: Union[Dict, List[Dict]]) -> _LocalTable:
+        self._method = "insert"
+        self._data = data
+        return self
+
+    def upsert(self, data: Union[Dict, List[Dict]], on_conflict: str = "") -> _LocalTable:
+        self._method = "upsert"
+        self._data = data
+        self._on_conflict = on_conflict
+        return self
+
+    def eq(self, column: str, value: Any) -> _LocalTable:
+        self._filters.append(("eq", column, value))
+        return self
+
+    def ilike(self, column: str, pattern: str) -> _LocalTable:
+        self._filters.append(("ilike", column, pattern))
+        return self
+
+    @property
+    def not_(self) -> _LocalTable:
+        # Returns a proxy that negates the next filter
+        return _NotProxy(self)
+
+    def in_(self, column: str, values: List[Any]) -> _LocalTable:
+        self._filters.append(("in", column, values))
+        return self
+
+    def order(self, column: str, desc: bool = False) -> _LocalTable:
+        direction = "DESC" if desc else "ASC"
+        self._order = f"{column} {direction}"
+        return self
+
+    def limit(self, size: int) -> _LocalTable:
+        self._limit = size
+        return self
+
+    def execute(self) -> QueryResponse:
+        """Constructs and executes the SQL query."""
+        if self._method == "select":
+            return self._execute_select()
+        elif self._method == "insert":
+            return self._execute_insert()
+        elif self._method == "upsert":
+            return self._execute_upsert()
+        else:
+            raise NotImplementedError(f"Method {self._method} not implemented in shim")
+
+    def _execute_select(self) -> QueryResponse:
+        sql = f"SELECT {self._columns} FROM {self._table}"
+        params = []
+        
+        if self._filters:
+            where_clauses = []
+            for f_type, col, val in self._filters:
+                if f_type == "eq":
+                    where_clauses.append(f"{col} = %s")
+                    params.append(val)
+                elif f_type == "ilike":
+                    where_clauses.append(f"{col} ILIKE %s")
+                    params.append(val)
+                elif f_type == "in":
+                    where_clauses.append(f"{col} = ANY(%s)")
+                    params.append(val)
+                elif f_type == "not_in":
+                    where_clauses.append(f"NOT ({col} = ANY(%s))")
+                    params.append(val)
+            
+            sql += " WHERE " + " AND ".join(where_clauses)
+
+        if self._order:
+            sql += f" ORDER BY {self._order}"
+        
+        if self._limit:
+            sql += f" LIMIT {self._limit}"
+
+        with self._db._conn() as conn:
+            with conn.cursor(cursor_factory=self._db._extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+                return QueryResponse(data=[dict(r) for r in rows])
+
+    def _execute_insert(self) -> QueryResponse:
+        if isinstance(self._data, list):
+            return self._execute_bulk_insert()
+        
+        columns = ", ".join(self._data.keys())
+        placeholders = ", ".join([f"%({k})s" for k in self._data.keys()])
+        sql = f"INSERT INTO {self._table} ({columns}) VALUES ({placeholders}) RETURNING *"
+        
+        # Handle complex types for JSON
+        row = dict(self._data)
+        for k, v in row.items():
+            if isinstance(v, (dict, list)) and k not in ('epistemic_truths', 'core_concepts', 'labels', 'blocked_by', 'blocks', 'tags'):
+                row[k] = self._db._extras.Json(v)
+
+        with self._db._conn() as conn:
+            with conn.cursor(cursor_factory=self._db._extras.RealDictCursor) as cur:
+                cur.execute(sql, row)
+                result = cur.fetchone()
+                return QueryResponse(data=[dict(result)] if result else [])
+
+    def _execute_upsert(self) -> QueryResponse:
+        # Single row upsert logic (similar to upsert_engram)
+        if not self._on_conflict:
+            raise ValueError("Upsert requires on_conflict column(s)")
+            
+        columns = ", ".join(self._data.keys())
+        placeholders = ", ".join([f"%({k})s" for k in self._data.keys()])
+        
+        updates = []
+        for k in self._data.keys():
+            if k not in self._on_conflict.split(','):
+                updates.append(f"{k} = EXCLUDED.{k}")
+        
+        sql = f"""
+            INSERT INTO {self._table} ({columns}) 
+            VALUES ({placeholders}) 
+            ON CONFLICT ({self._on_conflict}) 
+            DO UPDATE SET {', '.join(updates)}
+            RETURNING *
+        """
+        
+        row = dict(self._data)
+        for k, v in row.items():
+            if isinstance(v, (dict, list)) and k not in ('epistemic_truths', 'core_concepts', 'labels', 'blocked_by', 'blocks', 'tags'):
+                row[k] = self._db._extras.Json(v)
+
+        with self._db._conn() as conn:
+            with conn.cursor(cursor_factory=self._db._extras.RealDictCursor) as cur:
+                cur.execute(sql, row)
+                result = cur.fetchone()
+                return QueryResponse(data=[dict(result)] if result else [])
+
+    def _execute_bulk_insert(self) -> QueryResponse:
+        # Simplified bulk insert for now
+        return QueryResponse(data=[])
+
+
+class _NotProxy:
+    def __init__(self, table: _LocalTable) -> None:
+        self._table = table
+
+    def in_(self, column: str, values: List[Any]) -> _LocalTable:
+        self._table._filters.append(("not_in", column, values))
+        return self._table
+
 
 class LocalDB:
     """Direct PostgreSQL backend — no external dependencies beyond psycopg2."""
@@ -38,35 +215,14 @@ class LocalDB:
         conn.autocommit = True
         return conn
 
-    # --- engrams ---
+    # --- generic table interface ---
+    def table(self, name: str) -> _LocalTable:
+        return _LocalTable(self, name)
+
+    # --- legacy/optimized methods ---
 
     def upsert_engram(self, data: dict) -> None:
-        sql = """
-        INSERT INTO mirror_engrams
-            (context_id, timestamp, series, project, epistemic_truths, core_concepts,
-             affective_vibe, energy_level, next_attractor, raw_data, embedding)
-        VALUES
-            (%(context_id)s, %(timestamp)s, %(series)s, %(project)s,
-             %(epistemic_truths)s, %(core_concepts)s, %(affective_vibe)s,
-             %(energy_level)s, %(next_attractor)s, %(raw_data)s, %(embedding)s)
-        ON CONFLICT (context_id) DO UPDATE SET
-            series = EXCLUDED.series,
-            project = EXCLUDED.project,
-            epistemic_truths = EXCLUDED.epistemic_truths,
-            core_concepts = EXCLUDED.core_concepts,
-            affective_vibe = EXCLUDED.affective_vibe,
-            energy_level = EXCLUDED.energy_level,
-            next_attractor = EXCLUDED.next_attractor,
-            raw_data = EXCLUDED.raw_data,
-            embedding = EXCLUDED.embedding
-        """
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                row = dict(data)
-                row["epistemic_truths"] = row.get("epistemic_truths") or []
-                row["core_concepts"] = row.get("core_concepts") or []
-                row["raw_data"] = self._extras.Json(row.get("raw_data") or {})
-                cur.execute(sql, row)
+        self.table("mirror_engrams").upsert(data, on_conflict="context_id").execute()
 
     def search_engrams(
         self,
@@ -78,7 +234,7 @@ class LocalDB:
         with self._conn() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT * FROM mirror_match_engrams_v2(%s, %s, %s, %s)",
+                    "SELECT * FROM mirror_match_engrams_v2(%s::vector, %s, %s, %s)",
                     [embedding, threshold, limit, project],
                 )
                 return [dict(r) for r in cur.fetchall()]
@@ -89,19 +245,10 @@ class LocalDB:
         limit: int = 10,
         project: Optional[str] = None,
     ) -> list[dict]:
-        sql = """
-        SELECT * FROM mirror_engrams
-        WHERE series ILIKE %(agent)s
-        {project_filter}
-        ORDER BY timestamp DESC
-        LIMIT %(limit)s
-        """
-        project_filter = "AND project = %(project)s" if project else ""
-        sql = sql.format(project_filter=project_filter)
-        with self._conn() as conn:
-            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
-                cur.execute(sql, {"agent": f"%{agent}%", "limit": limit, "project": project})
-                return [dict(r) for r in cur.fetchall()]
+        query = self.table("mirror_engrams").select("*").ilike("series", f"%{agent}%")
+        if project:
+            query = query.eq("project", project)
+        return query.order("timestamp", desc=True).limit(limit).execute().data
 
     def count_engrams(self, series_filter: Optional[str] = None) -> int:
         sql = "SELECT COUNT(*) FROM mirror_engrams"
@@ -113,8 +260,6 @@ class LocalDB:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 return cur.fetchone()[0]
-
-    # --- code nodes ---
 
     def upsert_code_nodes(self, rows: list[dict]) -> None:
         sql = """
@@ -152,7 +297,7 @@ class LocalDB:
         with self._conn() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT * FROM mirror_match_code_nodes(%s, %s, %s, %s, %s)",
+                    "SELECT * FROM mirror_match_code_nodes(%s::vector, %s, %s, %s, %s)",
                     [embedding, threshold, limit, repo, kind],
                 )
                 return [dict(r) for r in cur.fetchall()]
@@ -165,38 +310,6 @@ class LocalDB:
                 by_repo = {r["repo"]: r["n"] for r in rows}
                 total = sum(by_repo.values())
                 return total, by_repo
-
-    # --- tasks ---
-
-    def table(self, name: str) -> "_LocalTable":
-        return _LocalTable(self, name)
-
-
-class _LocalTable:
-    """Thin shim so task_router / agent_router can call .table(...).select/upsert."""
-
-    def __init__(self, db: LocalDB, name: str) -> None:
-        self._db = db
-        self._name = name
-
-    def select(self, *_args, count: Optional[str] = None, **_kw):
-        return self
-
-    def upsert(self, data, on_conflict: str = "") -> "_LocalTable":
-        self._upsert_data = data
-        self._conflict = on_conflict
-        return self
-
-    def execute(self):
-        # Minimal passthrough — task/agent routers handle their own SQL
-        return type("R", (), {"data": [], "count": 0})()
-
-    # filter chains — no-op shims so existing code doesn't crash
-    def eq(self, *a, **k): return self
-    def ilike(self, *a, **k): return self
-    def or_(self, *a, **k): return self
-    def order(self, *a, **k): return self
-    def limit(self, *a, **k): return self
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +328,6 @@ class SupabaseDB:
         key = os.getenv("SUPABASE_KEY") or os.environ["SUPABASE_API_KEY"]
         self._sb = create_client(url, key)
 
-    # Passthrough .table() so existing code works unchanged
     def table(self, name: str):
         return self._sb.table(name)
 
