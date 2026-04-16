@@ -46,6 +46,7 @@ class _LocalTable:
         self._limit: Optional[int] = None
         self._data: Any = None
         self._on_conflict: Optional[str] = None
+        self._single: bool = False  # Track if single() was called
 
     def select(self, columns: str = "*", count: Optional[str] = None) -> _LocalTable:
         self._method = "select"
@@ -61,6 +62,11 @@ class _LocalTable:
         self._method = "upsert"
         self._data = data
         self._on_conflict = on_conflict
+        return self
+
+    def update(self, data: Dict[str, Any]) -> _LocalTable:
+        self._method = "update"
+        self._data = data
         return self
 
     def eq(self, column: str, value: Any) -> _LocalTable:
@@ -89,6 +95,11 @@ class _LocalTable:
         self._limit = size
         return self
 
+    def single(self) -> _LocalTable:
+        """Expects exactly one result. Used by Supabase API-compatible code."""
+        self._single = True
+        return self
+
     def execute(self) -> QueryResponse:
         """Constructs and executes the SQL query."""
         if self._method == "select":
@@ -97,13 +108,15 @@ class _LocalTable:
             return self._execute_insert()
         elif self._method == "upsert":
             return self._execute_upsert()
+        elif self._method == "update":
+            return self._execute_update()
         else:
             raise NotImplementedError(f"Method {self._method} not implemented in shim")
 
     def _execute_select(self) -> QueryResponse:
         sql = f"SELECT {self._columns} FROM {self._table}"
         params = []
-        
+
         if self._filters:
             where_clauses = []
             for f_type, col, val in self._filters:
@@ -119,12 +132,12 @@ class _LocalTable:
                 elif f_type == "not_in":
                     where_clauses.append(f"NOT ({col} = ANY(%s))")
                     params.append(val)
-            
+
             sql += " WHERE " + " AND ".join(where_clauses)
 
         if self._order:
             sql += f" ORDER BY {self._order}"
-        
+
         if self._limit:
             sql += f" LIMIT {self._limit}"
 
@@ -132,7 +145,17 @@ class _LocalTable:
             with conn.cursor(cursor_factory=self._db._extras.RealDictCursor) as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
-                return QueryResponse(data=[dict(r) for r in rows])
+                result_data = [dict(r) for r in rows]
+
+                # Validate single() constraint
+                if self._single and len(result_data) != 1:
+                    raise ValueError(f"Expected exactly 1 row, got {len(result_data)}")
+
+                # If single() was called, return the single dict, not a list
+                if self._single and result_data:
+                    return QueryResponse(data=result_data[0])
+
+                return QueryResponse(data=result_data)
 
     def _execute_insert(self) -> QueryResponse:
         if isinstance(self._data, list):
@@ -185,6 +208,50 @@ class _LocalTable:
                 cur.execute(sql, row)
                 result = cur.fetchone()
                 return QueryResponse(data=[dict(result)] if result else [])
+
+    def _execute_update(self) -> QueryResponse:
+        """Execute UPDATE with WHERE clause."""
+        if not self._filters:
+            raise ValueError("Update requires WHERE filters (use .eq() etc.)")
+        if not self._data:
+            raise ValueError("Update requires data to set")
+
+        # Build SET clause
+        set_clauses = []
+        params = []
+        for col, val in self._data.items():
+            set_clauses.append(f"{col} = %s")
+            params.append(val)
+
+        # Build WHERE clause
+        where_clauses = []
+        for f_type, col, val in self._filters:
+            if f_type == "eq":
+                where_clauses.append(f"{col} = %s")
+                params.append(val)
+            elif f_type == "ilike":
+                where_clauses.append(f"{col} ILIKE %s")
+                params.append(val)
+            elif f_type == "in":
+                where_clauses.append(f"{col} = ANY(%s)")
+                params.append(val)
+            elif f_type == "not_in":
+                where_clauses.append(f"NOT ({col} = ANY(%s))")
+                params.append(val)
+
+        sql = f"UPDATE {self._table} SET {', '.join(set_clauses)} WHERE {' AND '.join(where_clauses)} RETURNING *"
+
+        with self._db._conn() as conn:
+            with conn.cursor(cursor_factory=self._db._extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+                result_data = [dict(r) for r in rows]
+
+                # If single() was called, return the single dict
+                if self._single and result_data:
+                    return QueryResponse(data=result_data[0])
+
+                return QueryResponse(data=result_data)
 
     def _execute_bulk_insert(self) -> QueryResponse:
         # Simplified bulk insert for now
