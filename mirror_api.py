@@ -14,7 +14,9 @@ import os
 import hashlib
 import json
 import logging
-from typing import List, Dict, Optional, Union
+import time
+from pathlib import Path
+from typing import List, Dict, Optional, Union, Tuple
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -47,6 +49,11 @@ supabase = db if hasattr(db, "table") else None
 # --- TENANT AUTH ---
 ADMIN_TOKEN = os.getenv("MIRROR_ADMIN_TOKEN", "sk-mumega-internal-001")
 TENANT_KEYS_PATH = "/home/mumega/mirror/tenant_keys.json"
+SOS_TOKENS_PATH = Path.home() / "SOS" / "sos" / "bus" / "tokens.json"
+
+# Cache for SOS tokens: (list_of_tokens, loaded_at_timestamp)
+_sos_tokens_cache: Tuple[list, float] = ([], 0.0)
+_SOS_TOKENS_TTL = 30.0  # seconds
 
 
 def _load_tenant_keys() -> dict:
@@ -63,18 +70,57 @@ def _load_tenant_keys() -> dict:
         return {}
 
 
+def _load_sos_tokens() -> list:
+    """Load SOS bus tokens with a 30-second TTL cache."""
+    global _sos_tokens_cache
+    tokens, loaded_at = _sos_tokens_cache
+    if time.monotonic() - loaded_at < _SOS_TOKENS_TTL:
+        return tokens
+    try:
+        if SOS_TOKENS_PATH.exists():
+            fresh = json.loads(SOS_TOKENS_PATH.read_text())
+            _sos_tokens_cache = (fresh, time.monotonic())
+            return fresh
+    except Exception:
+        pass
+    return tokens  # Return stale cache on error rather than empty list
+
+
 def resolve_token(authorization: str = Header(default="")) -> Optional[str]:
-    """Validate Bearer token. Returns None for admin, agent_slug for tenant, raises 401/403."""
+    """Validate Bearer token.
+
+    Returns:
+        None           — admin token, full unrestricted access.
+        agent_slug     — tenant_keys.json match, scoped to that agent.
+        "sos:<project>"— SOS bus token with a non-null project, scoped to that project.
+        "sos:*"        — SOS bus token with null project (internal agent), unrestricted.
+
+    Raises 401/403 on invalid or missing tokens.
+    """
     token = authorization.removeprefix("Bearer ").strip()
     if not token:
         raise HTTPException(status_code=401, detail="Authorization required")
     if token == ADMIN_TOKEN:
         return None  # Full access
+
+    # Check hashed tenant keys (existing path)
     key_hash = hashlib.sha256(token.encode()).hexdigest()
     keys = _load_tenant_keys()
-    if key_hash not in keys:
-        raise HTTPException(status_code=403, detail="Invalid token")
-    return keys[key_hash]
+    if key_hash in keys:
+        return keys[key_hash]
+
+    # Check SOS bus tokens (raw token comparison — these are NOT hashed in tokens.json)
+    for entry in _load_sos_tokens():
+        if entry.get("token") == token and entry.get("active", True):
+            project = entry.get("project")
+            if project:
+                # Customer-scoped token — force to their project
+                return f"sos:{project}"
+            else:
+                # Internal agent token — full access (like admin but identified)
+                return None
+
+    raise HTTPException(status_code=403, detail="Invalid token")
 
 
 # FastAPI app
@@ -262,8 +308,11 @@ async def search_memory(request: SearchRequest, tenant_slug: Optional[str] = Dep
         }
     """
     try:
-        # Tenant token locks search to their agent namespace
-        if tenant_slug:
+        # SOS bus customer token — force project scope, ignore request body value
+        if tenant_slug and tenant_slug.startswith("sos:"):
+            request.project = tenant_slug[4:]  # Strip "sos:" prefix
+        # Legacy tenant_keys.json token — lock agent filter to their slug
+        elif tenant_slug:
             request.agent_filter = tenant_slug
 
         logger.info(f"Search query: '{request.query}' (agent: {request.agent_filter})")
@@ -330,8 +379,13 @@ async def store_engram(request: EngramStoreRequest, tenant_slug: Optional[str] =
         }
     """
     try:
-        # Tenant token scopes the agent — can only store under their own slug
-        if tenant_slug:
+        # SOS bus customer token — force both project and agent, ignore request body values
+        if tenant_slug and tenant_slug.startswith("sos:"):
+            forced_project = tenant_slug[4:]  # Strip "sos:" prefix
+            request.project = forced_project
+            request.agent = forced_project
+        # Legacy tenant_keys.json token — scope agent to their slug
+        elif tenant_slug:
             request.agent = tenant_slug
 
         logger.info(f"Storing engram from {request.agent}: {request.context_id}")
@@ -381,8 +435,16 @@ async def get_recent_engrams(agent: str, limit: int = 10, project: Optional[str]
     Example: GET /recent/river?limit=5&project=gaf
     """
     try:
-        # Tenant token locks to their own agent slug
-        effective_agent = tenant_slug if tenant_slug else agent
+        # SOS bus customer token — force agent and project to their scope
+        if tenant_slug and tenant_slug.startswith("sos:"):
+            forced_project = tenant_slug[4:]
+            effective_agent = forced_project
+            project = forced_project  # Override any project from query param
+        # Legacy tenant_keys.json token — lock to their agent slug
+        elif tenant_slug:
+            effective_agent = tenant_slug
+        else:
+            effective_agent = agent
 
         engrams = db.recent_engrams(effective_agent, limit=limit, project=project)
         return {
