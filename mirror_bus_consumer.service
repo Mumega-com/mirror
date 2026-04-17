@@ -1,0 +1,14 @@
+[Unit]
+Description=Mirror Bus Consumer — SOS streams → engrams
+After=network.target redis-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mumega/mirror
+ExecStart=/usr/bin/python3 mirror_bus_consumer.py
+EnvironmentFile=/home/mumega/.env.secrets
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

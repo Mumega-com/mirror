@@ -109,9 +109,30 @@ def resolve_token(authorization: str = Header(default="")) -> Optional[str]:
     if key_hash in keys:
         return keys[key_hash]
 
-    # Check SOS bus tokens (raw token comparison — these are NOT hashed in tokens.json)
+    # Check SOS bus tokens. Post-SEC-001 tokens.json stores only hashes (sha256
+    # in `token_hash` or bcrypt in `hash`) — raw tokens are not on disk anymore.
+    # key_hash = sha256(token) already computed above.
     for entry in _load_sos_tokens():
-        if entry.get("token") == token and entry.get("active", True):
+        if not entry.get("active", True):
+            continue
+        matched = False
+        raw = entry.get("token") or ""
+        if raw and raw == token:
+            matched = True
+        else:
+            token_hash = entry.get("token_hash") or ""
+            if token_hash and token_hash == key_hash:
+                matched = True
+            else:
+                bcrypt_hash = entry.get("hash") or ""
+                if bcrypt_hash.startswith(("$2a$", "$2b$", "$2y$")):
+                    try:
+                        import bcrypt as _bcrypt
+                        if _bcrypt.checkpw(token.encode(), bcrypt_hash.encode()):
+                            matched = True
+                    except Exception:
+                        pass
+        if matched:
             project = entry.get("project")
             if project:
                 # Customer-scoped token — force to their project
@@ -198,10 +219,61 @@ def agent_to_series(agent: str) -> str:
     return mapping.get(agent.lower(), f"{agent.title()} - Agent Memory")
 
 
-# --- TASK SYSTEM ---
+# --- TASK SYSTEM — RETIRED (410 Gone) ---
+# The /tasks endpoints have been retired. Squad Service at :8060 is the
+# single source of truth for task state. All routes return HTTP 410 with a
+# pointer to the replacement URL so old callers get a clear message.
+from fastapi import APIRouter as _APIRouter
+from fastapi.responses import JSONResponse as _JSONResponse
+
+_RETIRED_BODY = {
+    "error": "Retired. Use Squad Service at http://localhost:8060/tasks instead.",
+    "replacement_url": "http://localhost:8060",
+}
+
+_tasks_retired_router = _APIRouter(prefix="/tasks", tags=["tasks-retired"])
+
+
+@_tasks_retired_router.get("")
+@_tasks_retired_router.post("")
+async def _tasks_root_retired():
+    logger.warning("DEPRECATED /tasks endpoint called — returning 410 Gone")
+    return _JSONResponse(status_code=410, content=_RETIRED_BODY)
+
+
+@_tasks_retired_router.get("/stats")
+async def _tasks_stats_retired():
+    logger.warning("DEPRECATED /tasks/stats endpoint called — returning 410 Gone")
+    return _JSONResponse(status_code=410, content=_RETIRED_BODY)
+
+
+@_tasks_retired_router.get("/conflicts")
+async def _tasks_conflicts_retired():
+    logger.warning("DEPRECATED /tasks/conflicts endpoint called — returning 410 Gone")
+    return _JSONResponse(status_code=410, content=_RETIRED_BODY)
+
+
+@_tasks_retired_router.get("/{task_id}")
+@_tasks_retired_router.put("/{task_id}")
+async def _tasks_item_retired(task_id: str):
+    logger.warning("DEPRECATED /tasks/%s endpoint called — returning 410 Gone", task_id)
+    return _JSONResponse(status_code=410, content=_RETIRED_BODY)
+
+
+@_tasks_retired_router.post("/{task_id}/complete")
+async def _tasks_complete_retired(task_id: str):
+    logger.warning("DEPRECATED /tasks/%s/complete endpoint called — returning 410 Gone", task_id)
+    return _JSONResponse(status_code=410, content=_RETIRED_BODY)
+
+
+# Register retired routes BEFORE the real task_router so they take priority
+app.include_router(_tasks_retired_router)
+
+# Keep task_router loaded (not executed — 410 handler intercepts first) so
+# task_init() can still verify the DB table on startup without failing imports.
 from task_router import router as task_router, init as task_init
 task_init(supabase, None)
-app.include_router(task_router)
+# task_router intentionally NOT re-included (retired routes above intercept all /tasks paths)
 
 # --- AGENT DNA & QNFT ---
 from agent_router import router as agent_router, init as agent_init
