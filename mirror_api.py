@@ -11,6 +11,7 @@ sharing access to the collective FRC knowledge base.
 """
 
 import os
+import sys
 import hashlib
 import json
 import logging
@@ -18,6 +19,11 @@ import time
 from pathlib import Path
 from typing import List, Dict, Optional, Union, Tuple
 from datetime import datetime
+
+# Ensure SOS package is importable from the canonical checkout location.
+_SOS_ROOT = Path("/mnt/HC_Volume_104325311/SOS")
+if str(_SOS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SOS_ROOT))
 
 from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel
@@ -49,11 +55,6 @@ supabase = db if hasattr(db, "table") else None
 # --- TENANT AUTH ---
 ADMIN_TOKEN = os.getenv("MIRROR_ADMIN_TOKEN", "sk-mumega-internal-001")
 TENANT_KEYS_PATH = "/home/mumega/mirror/tenant_keys.json"
-SOS_TOKENS_PATH = Path.home() / "SOS" / "sos" / "bus" / "tokens.json"
-
-# Cache for SOS tokens: (list_of_tokens, loaded_at_timestamp)
-_sos_tokens_cache: Tuple[list, float] = ([], 0.0)
-_SOS_TOKENS_TTL = 30.0  # seconds
 
 
 def _load_tenant_keys() -> dict:
@@ -70,76 +71,50 @@ def _load_tenant_keys() -> dict:
         return {}
 
 
-def _load_sos_tokens() -> list:
-    """Load SOS bus tokens with a 30-second TTL cache."""
-    global _sos_tokens_cache
-    tokens, loaded_at = _sos_tokens_cache
-    if time.monotonic() - loaded_at < _SOS_TOKENS_TTL:
-        return tokens
-    try:
-        if SOS_TOKENS_PATH.exists():
-            fresh = json.loads(SOS_TOKENS_PATH.read_text())
-            _sos_tokens_cache = (fresh, time.monotonic())
-            return fresh
-    except Exception:
-        pass
-    return tokens  # Return stale cache on error rather than empty list
-
-
 def resolve_token(authorization: str = Header(default="")) -> Optional[str]:
     """Validate Bearer token.
 
     Returns:
-        None           — admin token, full unrestricted access.
+        None           — admin token or internal SOS token, full unrestricted access.
         agent_slug     — tenant_keys.json match, scoped to that agent.
         "sos:<project>"— SOS bus token with a non-null project, scoped to that project.
-        "sos:*"        — SOS bus token with null project (internal agent), unrestricted.
 
     Raises 401/403 on invalid or missing tokens.
+
+    Implementation: delegates SOS bus-token verification to sos.services.auth.verify_bearer
+    (single source of truth). Legacy tenant_keys.json path is preserved for backwards
+    compatibility; that lookup is Mirror-specific and not part of the SOS bus.
     """
     token = authorization.removeprefix("Bearer ").strip()
     if not token:
         raise HTTPException(status_code=401, detail="Authorization required")
-    if token == ADMIN_TOKEN:
-        return None  # Full access
 
-    # Check hashed tenant keys (existing path)
+    # Admin token — full unrestricted access (no file I/O needed).
+    if token == ADMIN_TOKEN:
+        return None
+
+    # Legacy tenant_keys.json path — Mirror-specific, scoped to agent_slug.
     key_hash = hashlib.sha256(token.encode()).hexdigest()
     keys = _load_tenant_keys()
     if key_hash in keys:
         return keys[key_hash]
 
-    # Check SOS bus tokens. Post-SEC-001 tokens.json stores only hashes (sha256
-    # in `token_hash` or bcrypt in `hash`) — raw tokens are not on disk anymore.
-    # key_hash = sha256(token) already computed above.
-    for entry in _load_sos_tokens():
-        if not entry.get("active", True):
-            continue
-        matched = False
-        raw = entry.get("token") or ""
-        if raw and raw == token:
-            matched = True
-        else:
-            token_hash = entry.get("token_hash") or ""
-            if token_hash and token_hash == key_hash:
-                matched = True
+    # SOS bus tokens — delegate to canonical auth module.
+    # sys.path was configured at module load time to include /mnt/HC_Volume_104325311/SOS.
+    try:
+        from sos.services.auth import verify_bearer as _sos_verify_bearer  # type: ignore[import]
+        ctx = _sos_verify_bearer(f"Bearer {token}")
+        if ctx is not None:
+            if ctx.project:
+                # Customer-scoped token — force to their project.
+                return f"sos:{ctx.project}"
             else:
-                bcrypt_hash = entry.get("hash") or ""
-                if bcrypt_hash.startswith(("$2a$", "$2b$", "$2y$")):
-                    try:
-                        import bcrypt as _bcrypt
-                        if _bcrypt.checkpw(token.encode(), bcrypt_hash.encode()):
-                            matched = True
-                    except Exception:
-                        pass
-        if matched:
-            project = entry.get("project")
-            if project:
-                # Customer-scoped token — force to their project
-                return f"sos:{project}"
-            else:
-                # Internal agent token — full access (like admin but identified)
+                # Internal agent token (is_system or admin agent) — full access.
                 return None
+    except ImportError:
+        # SOS package not available — fall back gracefully (e.g., running in
+        # an environment without /mnt/HC_Volume_104325311/SOS mounted).
+        logger.warning("sos.services.auth not importable; SOS bus token lookup skipped")
 
     raise HTTPException(status_code=403, detail="Invalid token")
 
