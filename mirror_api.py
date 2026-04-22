@@ -574,6 +574,19 @@ if __name__ == "__main__":
     logger.info("Mirror SOS registration thread started")
     # --- end SOS Service Registry ---
 
+    # --- Bus Subscriber ---
+    try:
+        import importlib.util as _ilu
+        _sub_path = "/home/mumega/mirror/plugins/bus_subscriber/subscriber.py"
+        _sub_spec = _ilu.spec_from_file_location("mirror_bus_subscriber_plugin", _sub_path)
+        _sub_mod = _ilu.module_from_spec(_sub_spec)
+        _sub_spec.loader.exec_module(_sub_mod)
+        _sub_mod.start_thread()
+        logger.info("Mirror bus subscriber thread started")
+    except Exception as _e:
+        logger.warning("Bus subscriber failed to start: %s", _e)
+    # --- end Bus Subscriber ---
+
     uvicorn.run(
         app,
         host="0.0.0.0",
