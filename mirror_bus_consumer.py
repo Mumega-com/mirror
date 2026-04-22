@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +36,16 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
 )
 log = logging.getLogger("mirror.bus_consumer")
+
+# ---------------------------------------------------------------------------
+# Mirror kernel — direct import (no HTTP, no shim)
+# ---------------------------------------------------------------------------
+
+sys.path.insert(0, "/home/mumega")
+from mirror.kernel.db import get_db as _get_mirror_db          # noqa: E402
+from mirror.kernel.embeddings import get_embedding as _get_mirror_embedding  # noqa: E402
+
+_mirror_db = _get_mirror_db()   # singleton — initialized once, reused across messages
 
 # ---------------------------------------------------------------------------
 # Config
@@ -61,32 +72,23 @@ CONSUMER_NAME = "mirror-bus-consumer"
 V1_TYPES_TO_STORE = {"send", "task_created", "task_completed", "announce"}
 
 # ---------------------------------------------------------------------------
-# DB helper (re-uses Mirror's existing db.py)
+# DB / embedding helpers — delegate to Mirror kernel (imported above)
 # ---------------------------------------------------------------------------
 
 
 def _get_db():
-    """Return a LocalDB (or SupabaseDB) instance using Mirror's existing factory."""
-    import sys
-    sys.path.insert(0, "/home/mumega/mirror")
-    from db import get_db  # type: ignore[import]
-    return get_db()
+    """Return the module-level Mirror DB singleton."""
+    return _mirror_db
 
 
 def _get_embedding(text: str) -> list[float]:
     """
-    Generate a 1536-dim embedding via Gemini (same logic as mirror_api.py).
-    Falls back to a zero vector on failure so the engram is still stored.
+    Generate a 1536-dim embedding via the Mirror kernel cascade:
+    Gemini Embedding 2 → Gemini Embedding 1 → local ONNX → local hash.
+    Never raises — last tier (hash) always succeeds.
     """
     try:
-        from google import genai  # type: ignore[import]
-        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
-        result = client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=text[:8000],
-        )
-        emb = list(result.embeddings[0].values)
-        return emb[:1536]
+        return _get_mirror_embedding(text)
     except Exception as exc:
         log.warning("Embedding failed, using zero vector: %s", exc)
         return [0.0] * 1536
@@ -228,7 +230,7 @@ async def consumer_loop() -> None:
     redis_url = _build_redis_url()
     r = await aioredis.from_url(redis_url, decode_responses=True)
 
-    db = _get_db()
+    db = _mirror_db  # already initialized at module level
 
     known_streams: set[str] = set()
     last_scan = 0.0
