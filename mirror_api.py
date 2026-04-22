@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import time
+import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Union, Tuple
 from datetime import datetime
@@ -532,6 +533,46 @@ if __name__ == "__main__":
     logger.info(f"Agents: River, Knight, Oracle")
     logger.info(f"Enhanced Features: {'ENABLED' if ENHANCE_AVAILABLE else 'DISABLED'}")
     logger.info("=" * 60)
+
+    # --- SOS Service Registry ---
+    # Register Mirror with the SOS Redis service registry.
+    # Daemon thread dies automatically when the process exits.
+    def _register_with_sos() -> None:
+        """Write Mirror's registration to sos:registry:service:mirror every 30s."""
+        payload = json.dumps({
+            "name": "mirror",
+            "port": 8844,
+            "version": "2.0.0",
+            "health": "http://localhost:8844/health",
+            "capabilities": ["remember", "recall", "search_code"],
+            "kernel": "mirror",
+            "pid": os.getpid(),
+            "status": "online",
+        }).encode()
+        try:
+            import redis as _redis
+            r = _redis.Redis(
+                host=os.getenv("REDIS_HOST", "localhost"),
+                password=os.getenv("REDIS_PASSWORD", ""),
+                decode_responses=False,
+            )
+            while True:
+                try:
+                    r.setex("sos:registry:service:mirror", 90, payload)
+                    logger.debug("Mirror registered with SOS service registry")
+                except Exception as _e:
+                    logger.warning("Mirror SOS registration failed: %s", _e)
+                time.sleep(30)
+        except ImportError:
+            logger.warning("redis package not available — skipping SOS registration")
+
+    threading.Thread(
+        target=_register_with_sos,
+        daemon=True,
+        name="mirror-sos-registration",
+    ).start()
+    logger.info("Mirror SOS registration thread started")
+    # --- end SOS Service Registry ---
 
     uvicorn.run(
         app,
