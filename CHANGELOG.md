@@ -1,5 +1,42 @@
 # Changelog — Mirror
 
+## 2026-04-22 — SOS Kernel Merge + Hybrid Search + Infrastructure Hardening
+
+### Summary
+Mirror became a first-class SOS microkernel. SOS now imports `mirror.kernel.*` directly — no HTTP hop for internal calls. Hybrid search (BM25 + vector + RRF) deployed. Workspace isolation enforced at DB level. Inkwell MemoryPort wired. Backups live. Storage halved via halfvec.
+
+### Architecture
+- **Kernel merge**: SOS imports `mirror.kernel.db`, `mirror.kernel.embeddings`, `mirror.kernel.auth` directly via `PYTHONPATH`. HTTP service preserved for external callers only.
+- **Bus subscriber**: daemon thread inside Mirror reads SOS Redis streams and writes engrams directly to DB. Standalone `mirror_bus_consumer.service` removed.
+- **Service registry**: Mirror self-registers in SOS Redis on startup, TTL 90s, renewed every 30s.
+- **Unified auth**: SOS bus tokens (`sk-bus-*`) verified natively via `sos.kernel.auth` — no separate Mirror token needed for bus agents.
+
+### Search
+- **Hybrid search (MEM-001)**: BM25 full-text (`tsvector` GIN index, `ts_rank_cd`) + vector cosine merged with Reciprocal Rank Fusion (k=60). Each path fetches `top_k × 2` candidates, RRF merges, returns `top_k`.
+- **Migration 009**: `text_tsv tsvector GENERATED ALWAYS AS` column + GIN index on `raw_data->>'text'`.
+
+### Security
+- **Workspace isolation (migration 008)**: `workspace_id` column added to `mirror_engrams`. `mirror_match_engrams_v2` enforces filter inside the Postgres query plan — not post-filter. Cross-tenant breach impossible.
+- **SQL injection fix**: allowlist validators on table/column/order identifiers in QueryBuilder.
+
+### Storage
+- **halfvec migration (011)**: `embedding` column `vector(1536)` → `halfvec(1536)`. Index `ivfflat` → `hnsw (halfvec_cosine_ops, m=16, ef_construction=64)`. Storage: 385MB → 212MB (45% reduction). pgvector ≥ 0.7.0 required.
+
+### Schema
+- **Migration 010**: Added `owner_type TEXT` and `owner_id TEXT` columns to `mirror_engrams` — required by store route, were in code but missing from schema.
+- **BM25 fix**: `search_bm25` was selecting `ts` (column is `timestamp`) — fixed to `timestamp AS ts`.
+
+### Infrastructure
+- **Backups**: `scripts/backup-mirror-db.sh` — pg_dump + gzip + chunked wrangler upload to R2 (`mumega-backups/backups/mirror/`). 30-day retention. Cron: `0 2 * * *`. Timer: `03:00 UTC` daily.
+- **Systemd**: `TimeoutStopSec=10` added — bus subscriber daemon was blocking SIGTERM, causing SIGKILL escalation on restart.
+- **Inkwell MemoryPort**: `workers/inkwell-api/src/lib/memory-port.ts` — TypeScript adapter, fire-and-forget store on publish, `recall_content` MCP tool for pre-draft dedup.
+
+### Tests
+- 32 tests passing across auth, workspace isolation, MCP server, hybrid search.
+- New: 10 tests for RRF blend logic (`test_hybrid_search.py`) — pure Python, no DB required, including `top_k` bound assertion.
+
+---
+
 ## 2026-04-22 — Microkernel + Pi Backend + Workspace Isolation + MCP Server
 
 ### Summary
@@ -183,22 +220,22 @@ Token in URL path (not Authorization header) — required by Claude Desktop and 
 Mirror squad registered in SOS Squad Service (`:8060`).
 Token: `sk-squad-mirror-e57b81478753ee8e47b344e8a8fb9433` (store in `.env.secrets`).
 
-**Open backlog (12 tasks):**
+**Backlog (10 open, 2 closed):**
 
-| Priority | ID | Title |
-|----------|----|-------|
-| critical | mirror-backfill-workspaces | Backfill existing engrams into default workspace |
-| critical | mirror-token-issuance-api | Workspace token issuance API |
-| high | mirror-hybrid-search | Hybrid search — BM25 + vector + RRF reranking |
-| high | mirror-user-personal-mirrors | User personal mirrors — isolated per-user memory |
-| high | mirror-project-squad-collections | Project and squad memory collections |
-| high | mirror-halfvec-migration | halfvec migration — 50% storage reduction |
-| medium | mirror-three-source-blending | Three-source blending — semantic + frequency + recency |
-| medium | mirror-temporal-entity-layer | Temporal/entity layer — facts age and contradict |
-| medium | mirror-search-first-retrieval | Search-first retrieval tools — grep → describe → expand → synthesize |
-| medium | mirror-sensitivity-forgetting | Sensitivity scores + forgetting policy |
-| low | mirror-surprisal-metric | Surprisal metric for engram prioritization |
-| low | mirror-dreamer-specialists | Dreamer specialist agents — deduction + induction |
+| Priority | ID | Title | Status |
+|----------|----|-------|--------|
+| critical | mirror-backfill-workspaces | Backfill existing engrams into default workspace | open |
+| critical | mirror-token-issuance-api | Workspace token issuance API | open |
+| high | mirror-hybrid-search | Hybrid search — BM25 + vector + RRF reranking | ✅ closed |
+| high | mirror-user-personal-mirrors | User personal mirrors — isolated per-user memory | open |
+| high | mirror-project-squad-collections | Project and squad memory collections | open |
+| high | mirror-halfvec-migration | halfvec migration — 50% storage reduction | ✅ closed |
+| medium | mirror-three-source-blending | Three-source blending — semantic + frequency + recency | open |
+| medium | mirror-temporal-entity-layer | Temporal/entity layer — facts age and contradict | open |
+| medium | mirror-search-first-retrieval | Search-first retrieval tools — grep → describe → expand → synthesize | open |
+| medium | mirror-sensitivity-forgetting | Sensitivity scores + forgetting policy | open |
+| low | mirror-surprisal-metric | Surprisal metric for engram prioritization | open |
+| low | mirror-dreamer-specialists | Dreamer specialist agents — deduction + induction | open |
 
 ---
 
