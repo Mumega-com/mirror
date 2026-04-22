@@ -247,7 +247,7 @@ app.include_router(_tasks_retired_router)
 # Keep task_router loaded (not executed — 410 handler intercepts first) so
 # task_init() can still verify the DB table on startup without failing imports.
 from task_router import router as task_router, init as task_init
-task_init(supabase, None)
+task_init(supabase)
 # task_router intentionally NOT re-included (retired routes above intercept all /tasks paths)
 
 # --- AGENT DNA & QNFT ---
@@ -339,6 +339,16 @@ async def get_stats():
     except Exception as e:
         logger.error(f"Stats error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health")
+async def health():
+    """Lightweight health check — verifies DB connectivity."""
+    try:
+        db.count_engrams()
+        return {"status": "healthy", "service": "mirror"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.post("/search")

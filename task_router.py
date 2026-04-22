@@ -24,6 +24,7 @@ from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from mirror_api import get_embedding
 
 try:
     import redis as sync_redis
@@ -36,7 +37,6 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 # Will be set by mirror_api.py on startup
 _supabase = None
-_openai = None
 _redis = None
 
 
@@ -64,11 +64,11 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project);
 """.strip()
 
 
-def init(supabase_client, openai_client):
+def init(supabase_client, openai_client=None):
     """Initialize with shared clients from mirror_api."""
-    global _supabase, _openai, _redis
+    global _supabase, _redis
     _supabase = supabase_client
-    _openai = openai_client
+    # openai_client param kept for backwards compat but is unused — Gemini handles embeddings
     _check_table()
     _init_redis()
 
@@ -274,9 +274,8 @@ async def _store_completion_engram(task: Dict):
         if task.get("description"):
             text += f"\n{task['description']}"
 
-        # Generate embedding
-        resp = _openai.embeddings.create(input=text, model="text-embedding-3-small")
-        embedding = resp.data[0].embedding
+        # Generate embedding via Gemini (same as mirror_api.py)
+        embedding = get_embedding(text)
 
         engram = {
             "context_id": f"task-{task['id']}-completion",

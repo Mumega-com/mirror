@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import logging
+from contextlib import contextmanager
 from typing import Any, Optional, List, Dict, Union
 from dataclasses import dataclass, field
 
@@ -273,14 +274,21 @@ class LocalDB:
     def __init__(self) -> None:
         import psycopg2
         import psycopg2.extras
+        from psycopg2.pool import ThreadedConnectionPool
         self._psycopg2 = psycopg2
         self._extras = psycopg2.extras
         self._conn_str = DATABASE_URL
+        self._pool = ThreadedConnectionPool(minconn=2, maxconn=10, dsn=self._conn_str)
 
+    @contextmanager
     def _conn(self):
-        conn = self._psycopg2.connect(self._conn_str)
-        conn.autocommit = True
-        return conn
+        """Context manager that borrows a connection from the pool and returns it after use."""
+        conn = self._pool.getconn()
+        try:
+            conn.autocommit = True
+            yield conn
+        finally:
+            self._pool.putconn(conn)
 
     # --- generic table interface ---
     def table(self, name: str) -> _LocalTable:
