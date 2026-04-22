@@ -361,19 +361,15 @@ class LocalDB:
         project: Optional[str] = None,
         workspace_id: Optional[str] = None,
     ) -> list[dict]:
+        # Pass workspace_id as a function parameter so the DB enforces
+        # tenant isolation inside the query plan — not as a post-filter.
+        # mirror_match_engrams_v2 accepts filter_workspace_id as its 5th arg.
         with self._conn() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
-                if workspace_id:
-                    cur.execute(
-                        "SELECT * FROM mirror_match_engrams_v2(%s::vector, %s, %s, %s)"
-                        " WHERE workspace_id = %s",
-                        [embedding, threshold, limit, project, workspace_id],
-                    )
-                else:
-                    cur.execute(
-                        "SELECT * FROM mirror_match_engrams_v2(%s::vector, %s, %s, %s)",
-                        [embedding, threshold, limit, project],
-                    )
+                cur.execute(
+                    "SELECT * FROM mirror_match_engrams_v2(%s::vector, %s, %s, %s, %s)",
+                    [embedding, threshold, limit, project, workspace_id],
+                )
                 return [dict(r) for r in cur.fetchall()]
 
     def recent_engrams(
