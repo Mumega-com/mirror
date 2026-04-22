@@ -17,6 +17,39 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger("mirror.db")
 
+# ---------------------------------------------------------------------------
+# SQL identifier allowlists — prevents SQL injection via f-string identifiers
+# ---------------------------------------------------------------------------
+
+_ALLOWED_TABLES = frozenset({"mirror_engrams", "mirror_code_nodes"})
+_ALLOWED_COLUMNS = frozenset({
+    "id", "context_id", "agent", "text", "project", "workspace_id",
+    "owner_type", "owner_id", "epistemic_truths", "core_concepts",
+    "affective_vibe", "energy_level", "next_attractor", "metadata",
+    "created_at", "updated_at", "*",
+    # mirror_engrams extras
+    "series", "timestamp", "content", "embedding", "score",
+    # mirror_code_nodes extras
+    "node_id", "repo", "repo_path", "kind", "name", "qualified_name",
+    "file_path", "line_start", "line_end", "language", "signature",
+    "synced_at", "labels", "blocked_by", "blocks", "tags",
+})
+_ALLOWED_ORDER = frozenset({
+    "created_at DESC", "created_at ASC",
+    "updated_at DESC", "updated_at ASC",
+    "timestamp DESC", "timestamp ASC",
+    "id DESC", "id ASC",
+    "score DESC", "score ASC",
+})
+
+
+def _validate_identifier(value: str, allowed: frozenset, name: str) -> str:
+    """Return *value* unchanged if it is in *allowed*, otherwise raise ValueError."""
+    if value not in allowed:
+        raise ValueError(f"Invalid {name}: {value!r}")
+    return value
+
+
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://mirror:mirror_local_2026@localhost:5432/mirror",
@@ -39,7 +72,7 @@ class _LocalTable:
 
     def __init__(self, db: LocalDB, table_name: str) -> None:
         self._db = db
-        self._table = table_name
+        self._table = _validate_identifier(table_name, _ALLOWED_TABLES, "table")
         self._method = "select"  # select, insert, upsert, delete
         self._columns = "*"
         self._filters: List[tuple] = []
@@ -51,6 +84,10 @@ class _LocalTable:
 
     def select(self, columns: str = "*", count: Optional[str] = None) -> _LocalTable:
         self._method = "select"
+        # Validate each requested column against the allowlist
+        if columns != "*":
+            for col in (c.strip() for c in columns.split(",")):
+                _validate_identifier(col, _ALLOWED_COLUMNS, "column")
         self._columns = columns
         return self
 
@@ -71,10 +108,12 @@ class _LocalTable:
         return self
 
     def eq(self, column: str, value: Any) -> _LocalTable:
+        _validate_identifier(column, _ALLOWED_COLUMNS, "column")
         self._filters.append(("eq", column, value))
         return self
 
     def ilike(self, column: str, pattern: str) -> _LocalTable:
+        _validate_identifier(column, _ALLOWED_COLUMNS, "column")
         self._filters.append(("ilike", column, pattern))
         return self
 
@@ -84,16 +123,19 @@ class _LocalTable:
         return _NotProxy(self)
 
     def in_(self, column: str, values: List[Any]) -> _LocalTable:
+        _validate_identifier(column, _ALLOWED_COLUMNS, "column")
         self._filters.append(("in", column, values))
         return self
 
     def order(self, column: str, desc: bool = False) -> _LocalTable:
         direction = "DESC" if desc else "ASC"
-        self._order = f"{column} {direction}"
+        order_expr = f"{column} {direction}"
+        _validate_identifier(order_expr, _ALLOWED_ORDER, "order expression")
+        self._order = order_expr
         return self
 
     def limit(self, size: int) -> _LocalTable:
-        self._limit = size
+        self._limit = int(size)
         return self
 
     def single(self) -> _LocalTable:
@@ -264,6 +306,7 @@ class _NotProxy:
         self._table = table
 
     def in_(self, column: str, values: List[Any]) -> _LocalTable:
+        _validate_identifier(column, _ALLOWED_COLUMNS, "column")
         self._table._filters.append(("not_in", column, values))
         return self._table
 
