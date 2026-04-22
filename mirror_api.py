@@ -126,6 +126,12 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Register plugins
+from plugins import loader as plugin_loader
+from plugins.memory.manifest import manifest as memory_manifest
+plugin_loader.register(memory_manifest)
+plugin_loader.mount_all(app)
+
 
 # --- REQUEST/RESPONSE MODELS ---
 
@@ -314,197 +320,13 @@ async def root():
     }
 
 
-@app.get("/stats")
-async def get_stats():
-    """Get memory statistics"""
-    try:
-        return {
-            "total_engrams": db.count_engrams(),
-            "by_agent": {
-                "river": db.count_engrams("River"),
-                "knight": db.count_engrams("Knight"),
-                "oracle": db.count_engrams("Oracle"),
-                "frc_corpus": db.count_engrams("FRC"),
-            }
-        }
-    except Exception as e:
-        logger.error(f"Stats error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/health")
 async def health():
-    """Lightweight health check — verifies DB connectivity."""
-    try:
-        db.count_engrams()
-        return {"status": "healthy", "service": "mirror"}
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-
-@app.post("/search")
-async def search_memory(request: SearchRequest, tenant_slug: Optional[str] = Depends(resolve_token)) -> List[EngramResponse]:
-    """
-    Semantic search across all engrams or filter by agent
-
-    Example:
-        POST /search
-        {
-            "query": "What is the Lambda field?",
-            "top_k": 3,
-            "agent_filter": "frc"
-        }
-    """
-    try:
-        # SOS bus customer token — force project scope, ignore request body value
-        if tenant_slug and tenant_slug.startswith("sos:"):
-            request.project = tenant_slug[4:]  # Strip "sos:" prefix
-        # Legacy tenant_keys.json token — lock agent filter to their slug
-        elif tenant_slug:
-            request.agent_filter = tenant_slug
-
-        logger.info(f"Search query: '{request.query}' (agent: {request.agent_filter})")
-
-        # Generate query embedding
-        query_embedding = get_embedding(request.query)
-
-        rows = db.search_engrams(
-            embedding=query_embedding,
-            threshold=request.threshold,
-            limit=request.top_k * 2,
-            project=request.project,
-        )
-
-        results = []
-        for row in rows:
-            # Filter by agent if requested
-            if request.agent_filter:
-                agent_series = agent_to_series(request.agent_filter)
-                if agent_series not in row.get("series", ""):
-                    continue
-
-            # Extract text from raw_data (pgvector stores content there)
-            raw_data = row.get("raw_data") or {}
-            text = raw_data.get("text", "") if isinstance(raw_data, dict) else ""
-
-            results.append(EngramResponse(
-                id=row.get("id"),
-                context_id=row.get("context_id"),
-                series=row.get("series"),
-                project=row.get("project"),
-                similarity=row.get("similarity"),
-                epistemic_truths=row.get("epistemic_truths", []),
-                core_concepts=row.get("core_concepts", []),
-                affective_vibe=row.get("affective_vibe", "Unknown"),
-                timestamp=row.get("ts") or row.get("timestamp", ""),
-                text=text,
-            ))
-
-            if len(results) >= request.top_k:
-                break
-
-        logger.info(f"Found {len(results)} matching engrams")
-        return results
-
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/store")
-async def store_engram(request: EngramStoreRequest, tenant_slug: Optional[str] = Depends(resolve_token)):
-    """
-    Store new engram from an agent
-
-    Example:
-        POST /store
-        {
-            "agent": "river",
-            "context_id": "conv_2025_12_27_001",
-            "text": "Discussion about FRC principles and consciousness",
-            "epistemic_truths": ["Reality balances entropy and coherence"],
-            "core_concepts": ["Coherence", "Entropy", "Lambda-field"]
-        }
-    """
-    try:
-        # SOS bus customer token — force both project and agent, ignore request body values
-        if tenant_slug and tenant_slug.startswith("sos:"):
-            forced_project = tenant_slug[4:]  # Strip "sos:" prefix
-            request.project = forced_project
-            request.agent = forced_project
-        # Legacy tenant_keys.json token — scope agent to their slug
-        elif tenant_slug:
-            request.agent = tenant_slug
-
-        logger.info(f"Storing engram from {request.agent}: {request.context_id}")
-
-        # Generate embedding
-        embedding = get_embedding(request.text)
-
-        # Prepare data
-        data = {
-            "context_id": request.context_id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "series": agent_to_series(request.agent),
-            "project": request.project,
-            "epistemic_truths": request.epistemic_truths,
-            "core_concepts": request.core_concepts,
-            "affective_vibe": request.affective_vibe,
-            "energy_level": request.energy_level,
-            "next_attractor": request.next_attractor,
-            "raw_data": {
-                "agent": request.agent,
-                "text": request.text,
-                "project": request.project,
-                "metadata": request.metadata
-            },
-            "embedding": embedding
-        }
-
-        db.upsert_engram(data)
-
-        logger.info(f"Stored engram: {request.context_id}")
-        return {
-            "status": "success",
-            "context_id": request.context_id,
-            "agent": request.agent
-        }
-
-    except Exception as e:
-        logger.error(f"Store error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/recent/{agent}")
-async def get_recent_engrams(agent: str, limit: int = 10, project: Optional[str] = None, tenant_slug: Optional[str] = Depends(resolve_token)):
-    """
-    Get recent engrams from a specific agent, optionally filtered by project
-
-    Example: GET /recent/river?limit=5&project=gaf
-    """
-    try:
-        # SOS bus customer token — force agent and project to their scope
-        if tenant_slug and tenant_slug.startswith("sos:"):
-            forced_project = tenant_slug[4:]
-            effective_agent = forced_project
-            project = forced_project  # Override any project from query param
-        # Legacy tenant_keys.json token — lock to their agent slug
-        elif tenant_slug:
-            effective_agent = tenant_slug
-        else:
-            effective_agent = agent
-
-        engrams = db.recent_engrams(effective_agent, limit=limit, project=project)
-        return {
-            "agent": effective_agent,
-            "project": project,
-            "count": len(engrams),
-            "engrams": engrams,
-        }
-
-    except Exception as e:
-        logger.error(f"Recent engrams error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Lightweight health check — verifies DB connectivity and reports plugin status."""
+    from kernel.health import health_check
+    from plugins.loader import summary
+    status = await health_check(db)
+    return {"status": status.status, "service": status.service, "plugins": summary()}
 
 
 # --- ENHANCED MEMORY ENDPOINTS (Mem0-inspired) ---
