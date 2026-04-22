@@ -50,6 +50,23 @@ def _resolve_token(authorization: str = Header(default="")) -> TokenContext:
     return resolve_token_context(authorization)
 
 
+def _rrf_blend(
+    vector_results: list[dict],
+    bm25_results: list[dict],
+    k: int = 60,
+) -> list[dict]:
+    """Reciprocal Rank Fusion — merges two ranked lists by doc id."""
+    scores: dict[str, float] = {}
+    for rank, doc in enumerate(vector_results):
+        doc_id = str(doc.get("id", ""))
+        scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+    for rank, doc in enumerate(bm25_results):
+        doc_id = str(doc.get("id", ""))
+        scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
+    all_docs = {str(d.get("id", "")): d for d in vector_results + bm25_results}
+    return sorted(all_docs.values(), key=lambda d: scores.get(str(d.get("id", "")), 0.0), reverse=True)
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -70,17 +87,27 @@ async def search_memory(
         )
 
         query_embedding = _get_embedding_http(request.query)
+        internal_limit = request.top_k * 2
+        db = _get_db()
 
-        rows = _get_db().search_engrams(
+        # Hybrid retrieval — vector + BM25, blended with RRF
+        vector_rows = db.search_engrams(
             embedding=query_embedding,
             threshold=request.threshold,
-            limit=request.top_k * 2,
+            limit=internal_limit,
             project=request.project if ctx.is_admin else None,
             workspace_id=workspace_id,
         )
+        bm25_rows = db.search_bm25(
+            query=request.query,
+            limit=internal_limit,
+            workspace_id=workspace_id,
+        ) if hasattr(db, "search_bm25") else []
+
+        blended = _rrf_blend(vector_rows, bm25_rows)
 
         results = []
-        for row in rows:
+        for row in blended:
             # Agent-slug filter (legacy SOS sos:<project> path, admin-only)
             if ctx.is_admin and request.agent_filter:
                 agent_series = _agent_to_series(request.agent_filter)

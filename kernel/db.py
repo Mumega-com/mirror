@@ -372,6 +372,31 @@ class LocalDB:
                 )
                 return [dict(r) for r in cur.fetchall()]
 
+    def search_bm25(
+        self,
+        query: str,
+        limit: int,
+        workspace_id: Optional[str] = None,
+    ) -> list[dict]:
+        """Full-text BM25 search using tsvector column on raw_data->>'text'."""
+        sql = """
+            SELECT id, context_id, series, project, workspace_id,
+                   raw_data, epistemic_truths, core_concepts, affective_vibe,
+                   ts, ts_rank_cd(text_tsv, plainto_tsquery('english', %s)) AS bm25_rank
+            FROM mirror_engrams
+            WHERE text_tsv @@ plainto_tsquery('english', %s)
+        """
+        params: list = [query, query]
+        if workspace_id:
+            sql += " AND workspace_id = %s"
+            params.append(workspace_id)
+        sql += " ORDER BY bm25_rank DESC LIMIT %s"
+        params.append(limit)
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()]
+
     def recent_engrams(
         self,
         agent: str,
