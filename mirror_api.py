@@ -166,21 +166,12 @@ class EngramResponse(BaseModel):
 # --- HELPER FUNCTIONS ---
 
 def get_embedding(text: str) -> List[float]:
-    """Generate embedding using Gemini Embedding API (free)."""
+    """Generate embedding using Gemini Embedding API. Wraps embeddings.get_embedding for HTTP context."""
+    from embeddings import get_embedding as _get_embedding
     try:
-        from google import genai
-        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
-        result = client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=text[:8000],
-        )
-        emb = list(result.embeddings[0].values)
-        # Gemini returns 3072 dims. Mirror table expects 1536.
-        # Truncate to fit pgvector column. First N dims carry most signal.
-        return emb[:1536]
-    except Exception as e:
-        logger.error(f"Gemini embedding error: {e}")
-        raise HTTPException(status_code=500, detail=f"Embedding failed: {str(e)}")
+        return _get_embedding(text)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def agent_to_series(agent: str) -> str:

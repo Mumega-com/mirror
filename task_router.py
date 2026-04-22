@@ -24,7 +24,7 @@ from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from mirror_api import get_embedding
+from embeddings import get_embedding
 
 try:
     import redis as sync_redis
