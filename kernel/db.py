@@ -43,9 +43,10 @@ _ALLOWED_ORDER = frozenset({
 })
 
 
-def _validate_identifier(value: str, allowed: frozenset, name: str) -> str:
+def _validate_identifier(value: str, allowed: frozenset[str], name: str) -> str:
     """Return *value* unchanged if it is in *allowed*, otherwise raise ValueError."""
     if value not in allowed:
+        logger.warning("SQL identifier rejected: %s=%r", name, value)
         raise ValueError(f"Invalid {name}: {value!r}")
     return value
 
@@ -203,7 +204,9 @@ class _LocalTable:
     def _execute_insert(self) -> QueryResponse:
         if isinstance(self._data, list):
             return self._execute_bulk_insert()
-        
+
+        for k in self._data.keys():
+            _validate_identifier(k, _ALLOWED_COLUMNS, "column")
         columns = ", ".join(self._data.keys())
         placeholders = ", ".join([f"%({k})s" for k in self._data.keys()])
         sql = f"INSERT INTO {self._table} ({columns}) VALUES ({placeholders}) RETURNING *"
@@ -224,13 +227,20 @@ class _LocalTable:
         # Single row upsert logic (similar to upsert_engram)
         if not self._on_conflict:
             raise ValueError("Upsert requires on_conflict column(s)")
-            
+
+        # Validate on_conflict column(s) — may be "col" or "col1,col2"
+        conflict_cols = [c.strip() for c in self._on_conflict.split(",")]
+        for cc in conflict_cols:
+            _validate_identifier(cc, _ALLOWED_COLUMNS, "column")
+
+        for k in self._data.keys():
+            _validate_identifier(k, _ALLOWED_COLUMNS, "column")
         columns = ", ".join(self._data.keys())
         placeholders = ", ".join([f"%({k})s" for k in self._data.keys()])
-        
+
         updates = []
         for k in self._data.keys():
-            if k not in self._on_conflict.split(','):
+            if k not in conflict_cols:
                 updates.append(f"{k} = EXCLUDED.{k}")
         
         sql = f"""
@@ -263,6 +273,7 @@ class _LocalTable:
         set_clauses = []
         params = []
         for col, val in self._data.items():
+            _validate_identifier(col, _ALLOWED_COLUMNS, "column")
             set_clauses.append(f"{col} = %s")
             params.append(val)
 
