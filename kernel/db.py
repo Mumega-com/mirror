@@ -305,13 +305,21 @@ class LocalDB:
         threshold: float,
         limit: int,
         project: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> list[dict]:
         with self._conn() as conn:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT * FROM mirror_match_engrams_v2(%s::vector, %s, %s, %s)",
-                    [embedding, threshold, limit, project],
-                )
+                if workspace_id:
+                    cur.execute(
+                        "SELECT * FROM mirror_match_engrams_v2(%s::vector, %s, %s, %s)"
+                        " WHERE workspace_id = %s",
+                        [embedding, threshold, limit, project, workspace_id],
+                    )
+                else:
+                    cur.execute(
+                        "SELECT * FROM mirror_match_engrams_v2(%s::vector, %s, %s, %s)",
+                        [embedding, threshold, limit, project],
+                    )
                 return [dict(r) for r in cur.fetchall()]
 
     def recent_engrams(
@@ -319,10 +327,13 @@ class LocalDB:
         agent: str,
         limit: int = 10,
         project: Optional[str] = None,
+        workspace_id: Optional[str] = None,
     ) -> list[dict]:
         query = self.table("mirror_engrams").select("*").ilike("series", f"%{agent}%")
         if project:
             query = query.eq("project", project)
+        if workspace_id:
+            query = query.eq("workspace_id", workspace_id)
         return query.order("timestamp", desc=True).limit(limit).execute().data
 
     def count_engrams(self, series_filter: Optional[str] = None) -> int:
