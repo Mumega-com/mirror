@@ -25,8 +25,12 @@ from typing import Any, Optional
 
 logger = logging.getLogger("mirror.db.sqlite")
 
-SQLITE_PATH = os.getenv("MIRROR_SQLITE_PATH", str(Path.home() / ".mirror" / "mirror.db"))
-VECTOR_DIMS = int(os.getenv("MIRROR_VECTOR_DIMS", "1536"))
+def _default_sqlite_path() -> str:
+    return os.getenv("MIRROR_SQLITE_PATH", str(Path.home() / ".mirror" / "mirror.db"))
+
+
+def _default_vector_dims() -> int:
+    return int(os.getenv("MIRROR_VECTOR_DIMS", "1536"))
 
 
 def _pack(embedding: list[float]) -> bytes:
@@ -47,7 +51,11 @@ class SQLiteDB:
     - UUID generation via randomblob(16) instead of gen_random_uuid()
     """
 
-    def __init__(self, db_path: str = SQLITE_PATH, dims: int = VECTOR_DIMS) -> None:
+    def __init__(self, db_path: str = None, dims: int = None) -> None:
+        if db_path is None:
+            db_path = _default_sqlite_path()
+        if dims is None:
+            dims = _default_vector_dims()
         self.db_path = db_path
         self.dims = dims
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)

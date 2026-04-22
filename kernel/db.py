@@ -458,9 +458,10 @@ class SupabaseDB:
 # ---------------------------------------------------------------------------
 
 def get_db() -> "LocalDB | SupabaseDB | Any":
-    if MIRROR_BACKEND == "supabase":
+    backend = os.getenv("MIRROR_BACKEND", "local")
+    if backend == "supabase":
         return SupabaseDB()
-    elif MIRROR_BACKEND == "sqlite":
+    elif backend == "sqlite":
         from kernel.db_sqlite import SQLiteDB
         return SQLiteDB()
     return LocalDB()
