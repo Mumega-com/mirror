@@ -104,25 +104,23 @@ def resolve_token_context(
             is_admin=False,
         )
 
-    # 3. SOS bus tokens
+    # 3. SOS bus tokens — primary path for all SOS agents
     try:
-        from sos.services.auth import verify_bearer as _sos_verify  # type: ignore[import]
-        ctx = _sos_verify(f"Bearer {token}")
-        if ctx is not None:
-            if ctx.project:
-                return TokenContext(
-                    workspace_id=ctx.project,
-                    owner_type="project",
-                    owner_id=ctx.project,
-                    is_admin=False,
-                )
-            else:
-                return TokenContext(
-                    workspace_id=None,
-                    owner_type=None,
-                    owner_id=None,
-                    is_admin=True,
-                )
+        import sys as _sys
+        if '/home/mumega/SOS' not in _sys.path:
+            _sys.path.insert(0, '/home/mumega/SOS')
+        from sos.kernel.auth import verify_bearer as _sos_verify  # type: ignore[import]
+        sos_ctx = _sos_verify(f"Bearer {token}")
+        if sos_ctx is not None:
+            # Prefer agent identity; fall back to project scope
+            owner_id = sos_ctx.agent or sos_ctx.project or "unknown"
+            workspace_id = sos_ctx.project or "sos"
+            return TokenContext(
+                workspace_id=workspace_id,
+                owner_type="agent",
+                owner_id=owner_id,
+                is_admin=getattr(sos_ctx, 'is_admin', False),
+            )
     except ImportError:
         pass
     except Exception as exc:
