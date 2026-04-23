@@ -3,29 +3,30 @@ Tests for Mirror v1.0 — scope field, session engrams, X-Project-Context header
 """
 from __future__ import annotations
 
+import json
 import os
-import pathlib
 import sys
+import tempfile
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 os.environ["MIRROR_BACKEND"] = "sqlite"
-os.environ["MIRROR_SQLITE_PATH"] = "/tmp/mirror_test_v1.db"
-
-pathlib.Path("/tmp/mirror_test_v1.db").unlink(missing_ok=True)
 
 from kernel.db_sqlite import SQLiteDB
 from kernel.types import SearchRequest
-
-# Shared DB instance for all tests
-_db = SQLiteDB(db_path="/tmp/mirror_test_v1.db")
 
 # A unit embedding — all 1536 dims set to the same value so cosine similarity
 # between two identical vectors is 1.0 (normalised dot product = 1.0).
 _VEC_HIGH = [1.0 / (1536 ** 0.5)] * 1536  # normalised: cosine(self, self) = 1.0
 _VEC_LOW  = [0.0] * 1535 + [1.0]           # orthogonal — cosine with _VEC_HIGH ≈ 0
+
+
+@pytest.fixture
+def db(tmp_path):
+    """Fresh isolated SQLite DB per test — no cross-test pollution."""
+    return SQLiteDB(db_path=str(tmp_path / "test.db"))
 
 
 # ---------------------------------------------------------------------------
@@ -48,9 +49,9 @@ def test_scope_field_defaults_to_none() -> None:
 # Test 2: session engram stored with low importance_score and memory_tier
 # ---------------------------------------------------------------------------
 
-def test_session_engram_stored_with_low_importance() -> None:
+def test_session_engram_stored_with_low_importance(db: SQLiteDB) -> None:
     """Storing an engram with owner_type='session' writes importance_score=0.05."""
-    _db.upsert_engram({
+    db.upsert_engram({
         "context_id": "sess-engram-001",
         "series": "test-session",
         "owner_type": "session",
@@ -62,7 +63,7 @@ def test_session_engram_stored_with_low_importance() -> None:
     })
 
     # Retrieve via table API (bypasses importance filter)
-    with _db._conn() as conn:
+    with db._conn() as conn:
         row = conn.execute(
             "SELECT importance_score, memory_tier FROM mirror_engrams WHERE context_id = ?",
             ("sess-engram-001",),
@@ -77,12 +78,12 @@ def test_session_engram_stored_with_low_importance() -> None:
 # Test 3: session engram is invisible to standard recall (threshold=0.5)
 # ---------------------------------------------------------------------------
 
-def test_session_engram_below_search_threshold() -> None:
+def test_session_engram_below_search_threshold(db: SQLiteDB) -> None:
     """A session engram (importance_score=0.05) must not appear in search results
     when threshold=0.5, even if its vector similarity is high.
     """
     # Store a high-similarity session engram
-    _db.upsert_engram({
+    db.upsert_engram({
         "context_id": "sess-invisible-001",
         "series": "test-invisible",
         "owner_type": "session",
@@ -94,7 +95,7 @@ def test_session_engram_below_search_threshold() -> None:
     })
 
     # Also store a normal engram so we know the search works at all
-    _db.upsert_engram({
+    db.upsert_engram({
         "context_id": "normal-visible-001",
         "series": "test-visible",
         "owner_type": "agent",
@@ -105,7 +106,7 @@ def test_session_engram_below_search_threshold() -> None:
         "embedding": _VEC_HIGH,
     })
 
-    results = _db.search_engrams(
+    results = db.search_engrams(
         embedding=_VEC_HIGH,
         threshold=0.5,
         limit=10,
@@ -126,8 +127,6 @@ def test_session_engram_below_search_threshold() -> None:
 # Test 4: X-Project-Context overrides project filter in HTTP route
 # ---------------------------------------------------------------------------
 
-import json
-import tempfile
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from plugins import loader as plugin_loader
@@ -155,18 +154,23 @@ def _admin_headers(extra: dict | None = None) -> dict[str, str]:
     return h
 
 
-def test_x_project_context_overrides_project_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_x_project_context_overrides_project_filter(
+    db: SQLiteDB,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Engrams stored with owner_type='project'/owner_id='proj-v1'
     must appear when X-Project-Context: proj-v1 is sent by an admin caller.
 
     We bypass the live embedding service entirely:
-    - Store the project engram directly via _db.upsert_engram with a known vector.
+    - Store the project engram directly via db.upsert_engram with a known vector.
+    - Patch plugins.memory.routes._get_db so the /search route uses the same
+      isolated DB instance — guaranteeing it sees only this test's engrams.
     - Patch plugins.memory.routes._get_embedding_http so the /search query also
       returns that same vector — guaranteeing cosine similarity = 1.0.
     This mirrors the pattern used in test_session_engram_below_search_threshold.
     """
     # Store the project engram directly — no live encoder needed.
-    _db.upsert_engram({
+    db.upsert_engram({
         "context_id": "proj-engram-v1-001",
         "series": "test-project",
         "owner_type": "project",
@@ -178,9 +182,13 @@ def test_x_project_context_overrides_project_filter(monkeypatch: pytest.MonkeyPa
         "embedding": _VEC_HIGH,
     })
 
+    # Patch _get_db in the routes module so the HTTP handler uses our isolated
+    # per-test DB, not whatever the global env var points to.
+    import plugins.memory.routes as _routes
+    monkeypatch.setattr(_routes, "_get_db", lambda: db)
+
     # Patch the embedding function used inside the /search route so the query
     # vector matches the stored engram without hitting a real encoder.
-    import plugins.memory.routes as _routes
     monkeypatch.setattr(_routes, "_get_embedding_http", lambda text: _VEC_HIGH)
 
     r = _client.post(
