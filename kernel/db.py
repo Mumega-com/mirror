@@ -502,6 +502,121 @@ class LocalDB:
                     [memory_tier, importance_score, archived, engram_id],
                 )
 
+    # ------------------------------------------------------------------
+    # Token issuance API
+    # ------------------------------------------------------------------
+
+    def create_workspace(self, slug: str, name: str) -> dict:
+        """Create a new workspace. Returns the workspace row."""
+        import secrets as _secrets
+        ws_id = f"ws-{_secrets.token_hex(4)}"
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO mirror_workspaces (id, slug, name)
+                    VALUES (%s, %s, %s)
+                    RETURNING id, slug, name, active, created_at
+                    """,
+                    [ws_id, slug, name],
+                )
+                return dict(cur.fetchone())
+
+    def list_workspaces(self) -> list[dict]:
+        """Return all active workspaces."""
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, slug, name, active, created_at FROM mirror_workspaces WHERE active = true ORDER BY created_at DESC"
+                )
+                return [dict(r) for r in cur.fetchall()]
+
+    def issue_token(
+        self,
+        workspace_id: str,
+        label: str,
+        token_type: str,
+        owner_id: Optional[str],
+    ) -> dict:
+        """Issue a new token for a workspace.
+
+        Returns dict with plaintext `token` (shown once), `token_id`, and `workspace_id`.
+        Only the sha256 hash is stored — the plaintext is never persisted.
+        """
+        import secrets as _secrets
+        import hashlib as _hashlib
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT slug FROM mirror_workspaces WHERE id = %s AND active = true", [workspace_id])
+                row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Workspace {workspace_id} not found or inactive")
+        slug = row[0]
+
+        plaintext = f"sk-{slug}-{_secrets.token_hex(16)}"
+        token_hash = _hashlib.sha256(plaintext.encode()).hexdigest()
+        tok_id = f"tok-{_secrets.token_hex(4)}"
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO mirror_tokens (id, workspace_id, token_hash, label, token_type, owner_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    [tok_id, workspace_id, token_hash, label, token_type, owner_id],
+                )
+        return {"token": plaintext, "token_id": tok_id, "workspace_id": workspace_id, "label": label}
+
+    def list_tokens(self, workspace_id: str) -> list[dict]:
+        """Return all active tokens for a workspace (hashes excluded)."""
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, workspace_id, label, token_type, owner_id, active, created_at, last_used_at
+                    FROM mirror_tokens
+                    WHERE workspace_id = %s AND active = true
+                    ORDER BY created_at DESC
+                    """,
+                    [workspace_id],
+                )
+                return [dict(r) for r in cur.fetchall()]
+
+    def revoke_token(self, token_id: str) -> None:
+        """Soft-delete a token by setting active = false."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE mirror_tokens SET active = false WHERE id = %s",
+                    [token_id],
+                )
+
+    def resolve_token_from_db(self, token_hash: str) -> Optional[dict]:
+        """Look up a token by sha256 hash. Updates last_used_at. Returns None if not found/inactive."""
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT t.id, t.workspace_id, t.label, t.token_type, t.owner_id,
+                           w.slug as workspace_slug
+                    FROM mirror_tokens t
+                    JOIN mirror_workspaces w ON w.id = t.workspace_id
+                    WHERE t.token_hash = %s AND t.active = true AND w.active = true
+                    """,
+                    [token_hash],
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                result = dict(row)
+                cur.execute(
+                    "UPDATE mirror_tokens SET last_used_at = NOW() WHERE id = %s",
+                    [result["id"]],
+                )
+                return result
+
     def upsert_code_nodes(self, rows: list[dict]) -> None:
         sql = """
         INSERT INTO mirror_code_nodes
