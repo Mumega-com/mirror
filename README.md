@@ -62,6 +62,8 @@ Mirror is structured as a **microkernel with an optional HTTP service** on top:
 │         PostgreSQL + pgvector (halfvec)              │
 │   mirror_engrams      — episodic memories            │
 │   mirror_code_nodes   — code graph nodes             │
+│   mirror_workspaces   — tenant workspaces            │
+│   mirror_tokens       — issued API tokens            │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -146,11 +148,36 @@ admin token    → workspace_id = NULL     → sees all (admin only)
 
 ## Auth
 
-Three-tier cascade in `kernel/auth.py`:
+Four-tier cascade in `kernel/auth.py`:
 
 1. **Admin token** — `MIRROR_ADMIN_TOKEN` env var, full access
-2. **SOS bus token** — `sk-bus-*` tokens verified via `sos.kernel.auth` (if SOS is on `PYTHONPATH`)
-3. **Tenant keys** — `tenant_keys.json` per-agent tokens (legacy, preserved for backwards compat)
+2. **DB-issued tokens** — `mirror_tokens` table, issued via REST API (primary path for SaaS customers)
+3. **SOS bus tokens** — verified via `sos.kernel.auth` (if SOS is on `PYTHONPATH`)
+4. **Tenant keys** — `tenant_keys.json` legacy fallback (preserved for backwards compat)
+
+### Issuing tokens
+
+Use the admin REST API to create workspaces and issue scoped tokens:
+
+```bash
+# Create a workspace
+curl -X POST http://localhost:8844/admin/workspaces \
+  -H "Authorization: Bearer $MIRROR_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"slug": "acme", "name": "Acme Corp"}'
+
+# Issue a token (plaintext returned once — store it)
+curl -X POST http://localhost:8844/admin/workspaces/<ws-id>/tokens \
+  -H "Authorization: Bearer $MIRROR_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "kasra-agent", "token_type": "agent", "owner_id": "kasra"}'
+
+# Revoke a token
+curl -X DELETE http://localhost:8844/admin/workspaces/<ws-id>/tokens/<tok-id> \
+  -H "Authorization: Bearer $MIRROR_ADMIN_TOKEN"
+```
+
+Token format: `sk-{workspace-slug}-{32 hex chars}`. Only the `sha256` hash is stored — plaintext is never persisted.
 
 When SOS is present, agent tokens from the bus work in Mirror automatically — no separate key issuance needed.
 
@@ -225,11 +252,49 @@ REDIS_PASSWORD=your_redis_password
 | `POST` | `/code/sync` | Index a codebase |
 | `GET` | `/code/stats` | Indexed node counts |
 
+### Admin (requires `MIRROR_ADMIN_TOKEN`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/admin/workspaces` | Create a workspace |
+| `GET` | `/admin/workspaces` | List all workspaces |
+| `POST` | `/admin/workspaces/{id}/tokens` | Issue a scoped token |
+| `GET` | `/admin/workspaces/{id}/tokens` | List tokens for a workspace |
+| `DELETE` | `/admin/workspaces/{id}/tokens/{tok}` | Revoke a token |
+
 ### System
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/health` | Service health + plugin status |
+
+---
+
+## Dreamer — Nightly Memory Consolidation
+
+Mirror ships a nightly consolidation script (`scripts/dreamer.py`) that scores, promotes, and archives engrams on a schedule.
+
+**Scoring formula:** `importance = (base_weight × recency_factor × reference_count) / 8.0`
+- `recency_factor = 1 / (1 + age_days × 0.1)`
+- `base_weight = 5.0` for pinned engrams, `1.0` otherwise
+
+**Tier promotion:**
+```
+working   → episodic   (score > 0.4)
+episodic  → long_term  (score > 0.7, age > 7d)
+long_term → procedural (score > 0.8, age > 30d)
+system    → never promoted
+```
+
+**Archive:** engrams older than 365 days with score < 0.1 are soft-archived.
+
+```bash
+python scripts/dreamer.py --dry-run   # preview
+python scripts/dreamer.py             # live run
+python scripts/dreamer.py --stats     # tier distribution
+```
+
+Wire the included systemd timer to run at 03:30 UTC nightly.
 
 ---
 
