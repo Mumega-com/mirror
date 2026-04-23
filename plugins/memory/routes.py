@@ -188,14 +188,36 @@ async def store_engram(
             "embedding": embedding,
         }
 
-        _get_db().upsert_engram(data)
+        # Online dedup: if a near-identical engram already exists (cosine > 0.92)
+        # merge into it instead of creating a duplicate row.
+        db = _get_db()
+        merged = False
+        if hasattr(db, "search_engrams") and hasattr(db, "merge_engram"):
+            near = db.search_engrams(
+                embedding=embedding,
+                threshold=0.92,
+                limit=1,
+                workspace_id=workspace_id,
+            )
+            if near and near[0].get("similarity", 0) >= 0.92:
+                existing_id = near[0]["id"]
+                db.merge_engram(existing_id, request.text, request.metadata or {})
+                logger.info(
+                    "Merged duplicate into engram %s (similarity=%.3f)",
+                    existing_id, near[0]["similarity"],
+                )
+                merged = True
 
-        logger.info("Stored engram: %s", request.context_id)
+        if not merged:
+            db.upsert_engram(data)
+
+        logger.info("Stored engram: %s (merged=%s)", request.context_id, merged)
         return {
             "status": "success",
             "context_id": request.context_id,
             "agent": agent,
             "workspace_id": workspace_id,
+            "merged": merged,
         }
 
     except HTTPException:

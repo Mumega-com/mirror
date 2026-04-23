@@ -353,6 +353,25 @@ class LocalDB:
     def upsert_engram(self, data: dict) -> None:
         self.table("mirror_engrams").upsert(data, on_conflict="context_id").execute()
 
+    def merge_engram(self, engram_id: str, new_text: str, new_metadata: dict) -> None:
+        """Merge new content into an existing near-duplicate engram.
+
+        Increments reference_count and boosts importance_score rather than
+        creating a new row. Called by the online dedup path in /store.
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE mirror_engrams SET
+                        reference_count  = reference_count + 1,
+                        importance_score = LEAST(importance_score * 1.1, 10.0),
+                        timestamp        = NOW()
+                    WHERE id = %s
+                    """,
+                    [engram_id],
+                )
+
     def search_engrams(
         self,
         embedding: list[float],
