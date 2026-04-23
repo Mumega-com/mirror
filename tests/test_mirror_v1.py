@@ -251,3 +251,68 @@ def test_bm25_sql_excludes_session_engrams(monkeypatch):
     assert "importance_score >= 0.1" in full_sql, (
         f"BM25 SQL missing importance_score filter — session engrams can bleed through.\nSQL: {full_sql}"
     )
+
+
+# ---------------------------------------------------------------------------
+# LocalDB.search_engrams — owner_type/owner_id params accepted (no PG needed)
+# ---------------------------------------------------------------------------
+
+def test_localdb_search_engrams_accepts_owner_params():
+    """LocalDB.search_engrams must accept owner_type/owner_id without TypeError
+    and must bypass mirror_match_engrams_v2, using owner_type/owner_id in WHERE.
+
+    Verified without a real PG connection by capturing cur.execute arguments.
+    """
+    from unittest.mock import MagicMock
+    import kernel.db as db_module
+
+    captured_sql: list[str] = []
+    captured_params: list = []
+
+    fake_cur = MagicMock()
+    fake_cur.__enter__ = lambda s: s
+    fake_cur.__exit__ = MagicMock(return_value=False)
+    fake_cur.fetchall.return_value = []
+    fake_cur.execute.side_effect = lambda sql, params: (
+        captured_sql.append(sql),
+        captured_params.append(params),
+    )
+
+    fake_conn = MagicMock()
+    fake_conn.__enter__ = lambda s: s
+    fake_conn.__exit__ = MagicMock(return_value=False)
+    fake_conn.cursor.return_value = fake_cur
+
+    fake_extras = MagicMock()
+    fake_extras.RealDictCursor = None
+
+    instance = object.__new__(db_module.LocalDB)
+    instance._extras = fake_extras
+    instance._conn = lambda: fake_conn
+
+    vec = [0.0] * 1536
+
+    # Must not raise TypeError
+    instance.search_engrams(
+        embedding=vec,
+        threshold=0.5,
+        limit=10,
+        owner_type="agent",
+        owner_id="agent-abc",
+    )
+
+    assert captured_sql, "search_engrams did not execute any SQL"
+    full_sql = " ".join(captured_sql)
+
+    # Must NOT call mirror_match_engrams_v2 when owner filters are set
+    assert "mirror_match_engrams_v2" not in full_sql, (
+        "search_engrams called mirror_match_engrams_v2 despite owner filters — "
+        "owner_type/owner_id columns missing from function output."
+    )
+    # Must filter on owner_type and owner_id in the raw SQL
+    assert "owner_type" in full_sql, "SQL missing owner_type filter"
+    assert "owner_id" in full_sql, "SQL missing owner_id filter"
+    # Must still enforce importance_score floor (no session engram bleed)
+    assert "importance_score >= 0.1" in full_sql, (
+        "SQL missing importance_score floor — session engrams can bleed through owner-filtered path"
+    )

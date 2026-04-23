@@ -381,7 +381,41 @@ class LocalDB:
         limit: int,
         project: Optional[str] = None,
         workspace_id: Optional[str] = None,
+        owner_type: Optional[str] = None,
+        owner_id: Optional[str] = None,
     ) -> list[dict]:
+        if owner_type is not None or owner_id is not None:
+            # mirror_match_engrams_v2 doesn't return owner_type/owner_id columns so we
+            # can't post-filter on them. Query the engrams table directly with cosine
+            # similarity when owner filters are needed (e.g., blend path in routes.py).
+            sql = """
+                SELECT id, context_id, series, project, workspace_id,
+                       owner_type, owner_id, importance_score, memory_tier,
+                       raw_data, epistemic_truths, core_concepts, affective_vibe,
+                       energy_level, next_attractor,
+                       timestamp AS ts,
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM mirror_engrams
+                WHERE importance_score >= 0.1
+                  AND 1 - (embedding <=> %s::vector) >= %s
+            """
+            params: list = [embedding, embedding, threshold]
+            if owner_type is not None:
+                sql += " AND owner_type = %s"
+                params.append(owner_type)
+            if owner_id is not None:
+                sql += " AND owner_id = %s"
+                params.append(owner_id)
+            if workspace_id:
+                sql += " AND workspace_id = %s"
+                params.append(workspace_id)
+            sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
+            params.extend([embedding, limit])
+            with self._conn() as conn:
+                with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                    cur.execute(sql, params)
+                    return [dict(r) for r in cur.fetchall()]
+
         # Pass workspace_id as a function parameter so the DB enforces
         # tenant isolation inside the query plan — not as a post-filter.
         # mirror_match_engrams_v2 accepts filter_workspace_id as its 5th arg.
