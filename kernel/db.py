@@ -29,6 +29,7 @@ _ALLOWED_COLUMNS = frozenset({
     "created_at", "updated_at", "*",
     # mirror_engrams extras
     "series", "timestamp", "content", "embedding", "score", "raw_data", "embedding_model",
+    "memory_tier", "importance_score", "reference_count", "archived",
     # mirror_code_nodes extras
     "node_id", "repo", "repo_path", "kind", "name", "qualified_name",
     "file_path", "line_start", "line_end", "language", "signature",

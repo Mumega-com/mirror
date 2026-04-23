@@ -1,0 +1,13 @@
+[Unit]
+Description=Mirror Dreamer — nightly memory consolidation
+After=mirror.service
+Requires=mirror.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/mumega/mirror
+ExecStart=/usr/bin/python3 /home/mumega/mirror/scripts/dreamer.py
+Environment=HOME=/home/mumega
+EnvironmentFile=/home/mumega/.env.secrets
+StandardOutput=journal
+StandardError=journal

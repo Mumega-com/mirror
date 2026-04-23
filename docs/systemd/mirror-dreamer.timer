@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Mirror Dreamer — fires at 03:30 UTC after backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
