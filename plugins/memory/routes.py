@@ -263,20 +263,29 @@ async def get_recent_engrams(
 async def get_stats(ctx: TokenContext = Depends(_resolve_token)):
     """Get memory statistics (admin: global; tenant: workspace-scoped count)."""
     try:
+        db = _get_db()
         if ctx.is_admin:
             return {
-                "total_engrams": _get_db().count_engrams(),
+                "total_engrams": db.count_engrams(),
                 "by_agent": {
-                    "river": _get_db().count_engrams("River"),
-                    "knight": _get_db().count_engrams("Knight"),
-                    "oracle": _get_db().count_engrams("Oracle"),
-                    "frc_corpus": _get_db().count_engrams("FRC"),
+                    "river": db.count_engrams("River"),
+                    "knight": db.count_engrams("Knight"),
+                    "oracle": db.count_engrams("Oracle"),
+                    "frc_corpus": db.count_engrams("FRC"),
                 },
             }
         else:
+            # Non-admin callers get a count scoped to their own workspace only.
+            # count_engrams_in_workspace ensures mumega-internal is never counted
+            # for customer tokens (and customers never count each other's engrams).
+            count = (
+                db.count_engrams_in_workspace(ctx.workspace_id)
+                if hasattr(db, "count_engrams_in_workspace")
+                else db.count_engrams()
+            )
             return {
                 "workspace_id": ctx.workspace_id,
-                "total_engrams": _get_db().count_engrams(),
+                "total_engrams": count,
             }
     except Exception as e:
         logger.error("Stats error: %s", e)

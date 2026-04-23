@@ -21,6 +21,15 @@ logger = logging.getLogger("mirror.auth")
 _FALLBACK_ADMIN_TOKEN = "sk-mumega-internal-001"
 _FALLBACK_TENANT_KEYS_PATH = "/home/mumega/mirror/tenant_keys.json"
 
+# Internal Mumega agents — their engrams go to the "mumega-internal" namespace,
+# not to a customer workspace and not to NULL (admin). This prevents internal
+# agent memories from leaking to customers or from polluting the admin-null pool.
+INTERNAL_AGENTS: frozenset[str] = frozenset({
+    "kasra", "athena", "loom", "sovereign", "mumega", "codex",
+    "sol", "hermes", "river", "worker", "dandan", "mkt-lead",
+    "mizan", "gemma", "dara", "sos-medic", "agentlink",
+})
+
 
 @dataclass
 class TokenContext:
@@ -67,10 +76,15 @@ def resolve_token_context(
 
     Resolution order:
     1. Empty → 401
-    2. Admin token → TokenContext(is_admin=True)
-    3. tenant_keys.json hit → TokenContext scoped to that tenant
-    4. SOS bus token (sos.services.auth) → TokenContext scoped to project
-    5. Unknown → 401
+    2. Admin token → TokenContext(is_admin=True, workspace_id=None)
+    3. DB-backed token (mirror_tokens table) → scoped to workspace
+    4. tenant_keys.json hit → TokenContext scoped to that tenant
+    5. SOS bus token (sos.kernel.auth) → internal agents get workspace_id="mumega-internal"
+    6. Unknown → 401
+
+    Internal agents (kasra, athena, loom, etc.) always resolve to
+    workspace_id="mumega-internal" so their engrams are namespace-isolated
+    from customer data. Admin token stays workspace_id=None (sees everything).
 
     Args:
         authorization: Full "Bearer <token>" header value (or bare token).
@@ -129,14 +143,26 @@ def resolve_token_context(
         from sos.kernel.auth import verify_bearer as _sos_verify  # type: ignore[import]
         sos_ctx = _sos_verify(f"Bearer {token}")
         if sos_ctx is not None:
-            # Prefer agent identity; fall back to project scope
-            owner_id = sos_ctx.agent or sos_ctx.project or "unknown"
-            workspace_id = sos_ctx.project or "sos"
+            agent_slug = sos_ctx.agent or ""
+            owner_id = agent_slug or sos_ctx.project or "unknown"
+            sos_is_admin = getattr(sos_ctx, 'is_admin', False)
+
+            # Admin SOS tokens keep workspace_id=None (full visibility).
+            # Internal agents get "mumega-internal" so their engrams are
+            # isolated from customer namespaces (and vice-versa).
+            # All other SOS tokens scope to their project.
+            if sos_is_admin:
+                workspace_id: Optional[str] = None
+            elif agent_slug.lower() in INTERNAL_AGENTS:
+                workspace_id = "mumega-internal"
+            else:
+                workspace_id = sos_ctx.project or "sos"
+
             return TokenContext(
                 workspace_id=workspace_id,
                 owner_type="agent",
                 owner_id=owner_id,
-                is_admin=getattr(sos_ctx, 'is_admin', False),
+                is_admin=sos_is_admin,
             )
     except ImportError:
         pass

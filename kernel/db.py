@@ -443,6 +443,19 @@ class LocalDB:
                 cur.execute(sql, params)
                 return cur.fetchone()[0]
 
+    def count_engrams_in_workspace(self, workspace_id: Optional[str]) -> int:
+        """Count engrams scoped to a specific workspace (safe for non-admin callers)."""
+        if workspace_id is None:
+            # None means admin — return global count (caller should use count_engrams instead)
+            return self.count_engrams()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM mirror_engrams WHERE workspace_id = %s",
+                    [workspace_id],
+                )
+                return cur.fetchone()[0]
+
     def fetch_dreamable_engrams(
         self,
         days_back: int = 7,

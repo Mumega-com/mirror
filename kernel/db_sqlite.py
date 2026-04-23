@@ -362,6 +362,16 @@ class SQLiteDB:
                 ).fetchone()[0]
             return conn.execute("SELECT COUNT(*) FROM mirror_engrams").fetchone()[0]
 
+    def count_engrams_in_workspace(self, workspace_id: Optional[str]) -> int:
+        """Count engrams scoped to a specific workspace (safe for non-admin callers)."""
+        if workspace_id is None:
+            return self.count_engrams()
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM mirror_engrams WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()[0]
+
     def get_stats(self) -> dict[str, int]:
         """Engram counts grouped by series (used by health endpoint)."""
         with self._conn() as conn:
