@@ -28,7 +28,7 @@ _ALLOWED_COLUMNS = frozenset({
     "affective_vibe", "energy_level", "next_attractor", "metadata",
     "created_at", "updated_at", "*",
     # mirror_engrams extras
-    "series", "timestamp", "content", "embedding", "score", "raw_data",
+    "series", "timestamp", "content", "embedding", "score", "raw_data", "embedding_model",
     # mirror_code_nodes extras
     "node_id", "repo", "repo_path", "kind", "name", "qualified_name",
     "file_path", "line_start", "line_end", "language", "signature",
@@ -351,6 +351,7 @@ class LocalDB:
     # --- legacy/optimized methods ---
 
     def upsert_engram(self, data: dict) -> None:
+        data.setdefault("embedding_model", "gemini-embedding-2-preview")
         self.table("mirror_engrams").upsert(data, on_conflict="context_id").execute()
 
     def merge_engram(self, engram_id: str, new_text: str, new_metadata: dict) -> None:
@@ -441,6 +442,65 @@ class LocalDB:
                 cur.execute(sql, params)
                 return cur.fetchone()[0]
 
+    def fetch_dreamable_engrams(
+        self,
+        days_back: int = 7,
+        min_importance: float = 0.3,
+        min_reference_count: int = 2,
+    ) -> list[dict]:
+        """Fetch engrams eligible for Dreamer consolidation.
+
+        Returns engrams from the last `days_back` days that meet either
+        importance or reference_count threshold, plus all non-system engrams
+        older than 80 days (archive candidates).
+        """
+        sql = """
+            SELECT
+                id,
+                context_id,
+                series,
+                timestamp,
+                memory_tier,
+                importance_score,
+                reference_count,
+                archived,
+                raw_data
+            FROM mirror_engrams
+            WHERE archived = false
+              AND memory_tier != 'system'
+              AND (
+                  (timestamp >= NOW() - INTERVAL '%s days'
+                   AND (importance_score >= %s OR reference_count >= %s))
+                  OR timestamp < NOW() - INTERVAL '80 days'
+              )
+            ORDER BY timestamp DESC
+        """
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(sql, [days_back, min_importance, min_reference_count])
+                return [dict(r) for r in cur.fetchall()]
+
+    def update_engram_quality(
+        self,
+        engram_id: str,
+        memory_tier: str,
+        importance_score: float,
+        archived: bool,
+    ) -> None:
+        """Update memory quality fields on a single engram."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE mirror_engrams
+                    SET memory_tier      = %s,
+                        importance_score = %s,
+                        archived         = %s
+                    WHERE id = %s
+                    """,
+                    [memory_tier, importance_score, archived, engram_id],
+                )
+
     def upsert_code_nodes(self, rows: list[dict]) -> None:
         sql = """
         INSERT INTO mirror_code_nodes
@@ -515,6 +575,7 @@ class SupabaseDB:
         return self._sb.rpc(fn, params)
 
     def upsert_engram(self, data: dict) -> None:
+        data.setdefault("embedding_model", "gemini-embedding-2-preview")
         self._sb.table("mirror_engrams").upsert(data, on_conflict="context_id").execute()
 
     def search_engrams(self, embedding, threshold, limit, project=None):
