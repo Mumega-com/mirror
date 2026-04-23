@@ -2,9 +2,8 @@
 
 **Shared semantic memory for AI agent teams.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
-[![Status: Active](https://img.shields.io/badge/status-active-brightgreen.svg)]()
+[![Status: Active](https://img.shields.io/badge/status-active-brightgreen.svg)](https://mumega.com)
 
 Mirror is a self-hostable memory layer for AI agents. Agents store episodic memories ("engrams") and retrieve them later by meaning — hybrid vector + full-text search with reciprocal rank fusion reranking. Built for multi-agent teams with workspace-level tenant isolation.
 
@@ -331,12 +330,4 @@ Mirror uses `halfvec(1536)` (16-bit floats) for embeddings and an HNSW index (`h
 
 ---
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
----
-
-## License
-
-MIT
+Built by [Mumega Labs](https://mumega.com)
