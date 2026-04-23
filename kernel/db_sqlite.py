@@ -311,7 +311,7 @@ class SQLiteDB:
 
             # Exclude low-importance engrams (e.g. session engrams with score=0.05)
             filters.append("e.importance_score >= ?")
-            params.append(threshold)
+            params.append(0.1)  # exclude session/working-memory tier (score=0.05) regardless of similarity threshold
 
             if workspace_id:
                 filters.append("e.workspace_id = ?")
