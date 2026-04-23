@@ -91,8 +91,11 @@ async def search_memory(
         internal_limit = request.top_k * 2
         db = _get_db()
 
-        if x_project_context:
-            # Blend: agent-owned engrams + project-scoped engrams
+        if x_project_context and not ctx.is_admin:
+            # Blend: agent-owned engrams (scoped to this caller) + project-scoped engrams.
+            # Admin callers are excluded from this path because ctx.owner_id is None for
+            # admin tokens — passing owner_id=None would skip the owner filter and leak
+            # agent engrams across all workspaces.
             agent_rows = db.search_engrams(
                 embedding=query_embedding,
                 threshold=request.threshold,
@@ -117,6 +120,17 @@ async def search_memory(
                     seen.add(row_id)
                     merged_rows.append(row)
             vector_rows = merged_rows
+        elif x_project_context:
+            # Admin caller with X-Project-Context: filter by project only, no blend.
+            # We do NOT use owner_id here to avoid cross-tenant leaks.
+            vector_rows = db.search_engrams(
+                embedding=query_embedding,
+                threshold=request.threshold,
+                limit=internal_limit,
+                workspace_id=workspace_id,
+                owner_type="project",
+                owner_id=x_project_context,
+            )
         else:
             # Hybrid retrieval — vector + BM25, blended with RRF
             vector_rows = db.search_engrams(
