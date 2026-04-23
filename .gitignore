@@ -12,3 +12,4 @@ gateway-worker/node_modules/
 tenant_keys.json
 mirror_code_sync.py.bak
 /tmp/
+.worktrees/
