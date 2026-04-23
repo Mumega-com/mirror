@@ -131,8 +131,10 @@ app = FastAPI(
 from plugins import loader as plugin_loader
 from plugins.memory.manifest import manifest as memory_manifest
 from plugins.mcp_server.manifest import manifest as mcp_server_manifest
+from plugins.admin.manifest import manifest as admin_manifest
 plugin_loader.register(memory_manifest)
 plugin_loader.register(mcp_server_manifest)
+plugin_loader.register(admin_manifest)
 plugin_loader.mount_all(app)
 
 

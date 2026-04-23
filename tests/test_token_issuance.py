@@ -10,12 +10,15 @@ os.environ["MIRROR_BACKEND"] = "local"
 # Uses DATABASE_URL from environment (set in .env)
 
 import pytest
-from kernel.db import get_db
+from kernel.db import get_db, LocalDB
 
 
 @pytest.fixture
 def db():
-    return get_db()
+    # Force LocalDB regardless of module-level MIRROR_BACKEND cached state
+    os.environ["MIRROR_BACKEND"] = "local"
+    _db = LocalDB()
+    return _db
 
 
 @pytest.fixture

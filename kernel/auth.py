@@ -90,8 +90,25 @@ def resolve_token_context(
     if token == admin_token:
         return TokenContext(workspace_id=None, owner_type=None, owner_id=None, is_admin=True)
 
-    # 2. Tenant keys
     key_hash = hashlib.sha256(token.encode()).hexdigest()
+
+    # 2.5 DB-backed tokens (mirror_tokens table) — primary path for issued tokens
+    try:
+        from kernel.db import get_db as _get_db
+        _db = _get_db()
+        if hasattr(_db, "resolve_token_from_db"):
+            row = _db.resolve_token_from_db(key_hash)
+            if row:
+                return TokenContext(
+                    workspace_id=row["workspace_id"],
+                    owner_type=row["token_type"],
+                    owner_id=row.get("owner_id") or row.get("label"),
+                    is_admin=row["token_type"] == "admin",
+                )
+    except Exception as _exc:
+        logger.warning("DB token lookup failed: %s", _exc)
+
+    # 3. Tenant keys (legacy — tenant_keys.json fallback)
     keys = _load_tenant_keys(tenant_keys_path)
     if key_hash in keys:
         entry = keys[key_hash]
@@ -104,7 +121,7 @@ def resolve_token_context(
             is_admin=False,
         )
 
-    # 3. SOS bus tokens — primary path for all SOS agents
+    # 4. SOS bus tokens — primary path for all SOS agents
     try:
         import sys as _sys
         if '/home/mumega/SOS' not in _sys.path:
