@@ -75,6 +75,7 @@ def _rrf_blend(
 async def search_memory(
     request: SearchRequest,
     ctx: TokenContext = Depends(_resolve_token),
+    x_project_context: Optional[str] = Header(default=None),
 ) -> List[EngramResponse]:
     """Semantic search across engrams, hard-scoped by workspace_id."""
     try:
@@ -82,22 +83,64 @@ async def search_memory(
         workspace_id = None if ctx.is_admin else ctx.workspace_id
 
         logger.info(
-            "Search query: '%s' (workspace: %s, admin: %s)",
-            request.query, workspace_id, ctx.is_admin,
+            "Search query: '%s' (workspace: %s, admin: %s, x_project_context: %s)",
+            request.query, workspace_id, ctx.is_admin, x_project_context,
         )
 
         query_embedding = _get_embedding_http(request.query)
         internal_limit = request.top_k * 2
         db = _get_db()
 
-        # Hybrid retrieval — vector + BM25, blended with RRF
-        vector_rows = db.search_engrams(
-            embedding=query_embedding,
-            threshold=request.threshold,
-            limit=internal_limit,
-            project=request.project if ctx.is_admin else None,
-            workspace_id=workspace_id,
-        )
+        if x_project_context and not ctx.is_admin:
+            # Blend: agent-owned engrams (scoped to this caller) + project-scoped engrams.
+            # Admin callers are excluded from this path because ctx.owner_id is None for
+            # admin tokens — passing owner_id=None would skip the owner filter and leak
+            # agent engrams across all workspaces.
+            agent_rows = db.search_engrams(
+                embedding=query_embedding,
+                threshold=request.threshold,
+                limit=internal_limit,
+                workspace_id=workspace_id,
+                owner_type="agent",
+                owner_id=ctx.owner_id,
+            )
+            project_rows = db.search_engrams(
+                embedding=query_embedding,
+                threshold=request.threshold,
+                limit=internal_limit,
+                owner_type="project",
+                owner_id=x_project_context,
+            )
+            # Deduplicate by id then blend via RRF
+            seen: set[str] = set()
+            merged_rows: list[dict] = []
+            for row in agent_rows + project_rows:
+                row_id = str(row.get("id", ""))
+                if row_id not in seen:
+                    seen.add(row_id)
+                    merged_rows.append(row)
+            vector_rows = merged_rows
+        elif x_project_context:
+            # Admin caller with X-Project-Context: filter by project only, no blend.
+            # We do NOT use owner_id here to avoid cross-tenant leaks.
+            vector_rows = db.search_engrams(
+                embedding=query_embedding,
+                threshold=request.threshold,
+                limit=internal_limit,
+                workspace_id=workspace_id,
+                owner_type="project",
+                owner_id=x_project_context,
+            )
+        else:
+            # Hybrid retrieval — vector + BM25, blended with RRF
+            vector_rows = db.search_engrams(
+                embedding=query_embedding,
+                threshold=request.threshold,
+                limit=internal_limit,
+                project=request.project if ctx.is_admin else None,
+                workspace_id=workspace_id,
+            )
+
         bm25_rows = db.search_bm25(
             query=request.query,
             limit=internal_limit,
@@ -149,6 +192,7 @@ async def search_memory(
 async def store_engram(
     request: EngramStoreRequest,
     ctx: TokenContext = Depends(_resolve_token),
+    x_session_id: Optional[str] = Header(default=None),
 ):
     """Store new engram, tagged with caller's workspace_id."""
     try:
@@ -162,6 +206,11 @@ async def store_engram(
             agent = ctx.owner_id or request.agent
             project = request.project
 
+        # Determine owner identity and session classification
+        is_session = ctx.owner_type == "session" or x_session_id is not None
+        effective_owner_type = "session" if is_session else ctx.owner_type
+        effective_owner_id = (x_session_id or ctx.owner_id) if is_session else ctx.owner_id
+
         logger.info("Storing engram from %s (workspace: %s): %s", agent, workspace_id, request.context_id)
 
         embedding = _get_embedding_http(request.text)
@@ -172,8 +221,8 @@ async def store_engram(
             "series": _agent_to_series(agent),
             "project": project,
             "workspace_id": workspace_id,
-            "owner_type": ctx.owner_type,
-            "owner_id": ctx.owner_id,
+            "owner_type": effective_owner_type,
+            "owner_id": effective_owner_id,
             "epistemic_truths": request.epistemic_truths,
             "core_concepts": request.core_concepts,
             "affective_vibe": request.affective_vibe,
@@ -187,6 +236,11 @@ async def store_engram(
             },
             "embedding": embedding,
         }
+
+        # Session engrams get low importance so they don't pollute standard recall
+        if is_session:
+            data["importance_score"] = 0.05
+            data["memory_tier"] = "working"
 
         # Online dedup: if a near-identical engram already exists (cosine > 0.92)
         # merge into it instead of creating a duplicate row.

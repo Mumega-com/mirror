@@ -113,9 +113,21 @@ class SQLiteDB:
                     project          TEXT,
                     workspace_id     TEXT,
                     owner_type       TEXT DEFAULT 'agent',
-                    owner_id         TEXT
+                    owner_id         TEXT,
+                    importance_score REAL DEFAULT 1.0,
+                    memory_tier      TEXT DEFAULT 'episodic'
                 )
             """)
+
+            # Migration: add new columns to existing databases
+            for col, definition in [
+                ("importance_score", "REAL DEFAULT 1.0"),
+                ("memory_tier",      "TEXT DEFAULT 'episodic'"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE mirror_engrams ADD COLUMN {col} {definition}")
+                except Exception:
+                    pass  # column already exists
 
             # sqlite-vec virtual table — stores embeddings alongside engram ids
             conn.execute(f"""
@@ -187,13 +199,14 @@ class SQLiteDB:
                 INSERT INTO mirror_engrams
                     (id, context_id, timestamp, series, epistemic_truths, core_concepts,
                      affective_vibe, energy_level, next_attractor, raw_data, project,
-                     workspace_id, owner_type, owner_id)
+                     workspace_id, owner_type, owner_id, importance_score, memory_tier)
                 VALUES (
                     coalesce(:id, lower(hex(randomblob(16)))),
                     :context_id, :timestamp, :series,
                     :epistemic_truths, :core_concepts, :affective_vibe,
                     :energy_level, :next_attractor, :raw_data, :project,
-                    :workspace_id, :owner_type, :owner_id
+                    :workspace_id, :owner_type, :owner_id,
+                    :importance_score, :memory_tier
                 )
                 ON CONFLICT(context_id) DO UPDATE SET
                     series           = excluded.series,
@@ -206,7 +219,9 @@ class SQLiteDB:
                     project          = excluded.project,
                     workspace_id     = excluded.workspace_id,
                     owner_type       = excluded.owner_type,
-                    owner_id         = excluded.owner_id
+                    owner_id         = excluded.owner_id,
+                    importance_score = excluded.importance_score,
+                    memory_tier      = excluded.memory_tier
             """, {
                 "id":               data.get("id"),
                 "context_id":       context_id,
@@ -222,6 +237,8 @@ class SQLiteDB:
                 "workspace_id":     data.get("workspace_id"),
                 "owner_type":       data.get("owner_type", "agent"),
                 "owner_id":         data.get("owner_id"),
+                "importance_score": data.get("importance_score", 1.0),
+                "memory_tier":      data.get("memory_tier", "episodic"),
             })
 
             # Resolve the actual id (needed for vec0 FK)
@@ -291,6 +308,10 @@ class SQLiteDB:
             placeholders = ",".join("?" * len(id_distance))
             filters = [f"e.id IN ({placeholders})"]
             params: list[Any] = list(id_distance.keys())
+
+            # Exclude low-importance engrams (e.g. session engrams with score=0.05)
+            filters.append("e.importance_score >= ?")
+            params.append(0.1)  # exclude session/working-memory tier (score=0.05) regardless of similarity threshold
 
             if workspace_id:
                 filters.append("e.workspace_id = ?")

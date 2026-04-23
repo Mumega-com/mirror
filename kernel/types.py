@@ -13,6 +13,7 @@ class SearchRequest(BaseModel):
     agent_filter: Optional[str] = None  # Filter by agent: "river", "knight", "oracle"
     project: Optional[str] = None  # Filter by project slug: "gaf", "mirror", "torivers"
     threshold: float = 0.5
+    scope: Optional[str] = None  # "session" | "principal" | "workspace" | "org"
 
 
 class EngramStoreRequest(BaseModel):
