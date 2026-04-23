@@ -206,3 +206,48 @@ def test_x_project_context_overrides_project_filter(
     assert "proj-engram-v1-001" in context_ids, (
         f"project engram not found in results: {context_ids}"
     )
+
+
+# ---------------------------------------------------------------------------
+# LocalDB.search_bm25 — importance_score filter (SQL inspection, no PG needed)
+# ---------------------------------------------------------------------------
+
+def test_bm25_sql_excludes_session_engrams(monkeypatch):
+    """search_bm25 must include importance_score >= 0.1 in generated SQL.
+
+    Session engrams (importance_score=0.05) must not bleed through the BM25
+    channel after RRF blend. We verify the SQL fragment without a real PG
+    connection by capturing cur.execute arguments.
+    """
+    from unittest.mock import MagicMock, patch
+    import importlib
+    import kernel.db as db_module
+
+    # Build a LocalDB instance without connecting to PG
+    captured: list[str] = []
+
+    fake_cur = MagicMock()
+    fake_cur.__enter__ = lambda s: s
+    fake_cur.__exit__ = MagicMock(return_value=False)
+    fake_cur.fetchall.return_value = []
+    fake_cur.execute.side_effect = lambda sql, params: captured.append(sql)
+
+    fake_conn = MagicMock()
+    fake_conn.__enter__ = lambda s: s
+    fake_conn.__exit__ = MagicMock(return_value=False)
+    fake_conn.cursor.return_value = fake_cur
+
+    fake_extras = MagicMock()
+    fake_extras.RealDictCursor = None
+
+    instance = object.__new__(db_module.LocalDB)
+    instance._extras = fake_extras
+    instance._conn = lambda: fake_conn
+
+    instance.search_bm25(query="session leak test", limit=5)
+
+    assert captured, "search_bm25 did not execute any SQL"
+    full_sql = " ".join(captured)
+    assert "importance_score >= 0.1" in full_sql, (
+        f"BM25 SQL missing importance_score filter — session engrams can bleed through.\nSQL: {full_sql}"
+    )

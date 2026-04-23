@@ -411,6 +411,7 @@ class LocalDB:
         if workspace_id:
             sql += " AND workspace_id = %s"
             params.append(workspace_id)
+        sql += " AND importance_score >= 0.1"  # exclude session/working-memory tier (score=0.05)
         sql += " ORDER BY bm25_rank DESC LIMIT %s"
         params.append(limit)
         with self._conn() as conn:
