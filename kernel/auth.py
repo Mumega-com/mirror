@@ -31,21 +31,30 @@ INTERNAL_AGENTS: frozenset[str] = frozenset({
 })
 
 
+VALID_TIERS: frozenset[str] = frozenset({"public", "squad", "project", "entity", "private"})
+
+
 @dataclass
 class TokenContext:
     """Resolved identity from a Bearer token.
 
     Attributes:
-        workspace_id: Hard isolation boundary. None means admin (sees all).
-        owner_type:   'user' | 'project' | 'squad' | 'agent' | None (admin).
-        owner_id:     Identifier of the owner within the workspace.
-        is_admin:     True only for the internal admin token.
+        workspace_id:  Hard isolation boundary. None means admin (sees all).
+        owner_type:    'user' | 'project' | 'squad' | 'agent' | None (admin).
+        owner_id:      Identifier of the owner within the workspace.
+        is_admin:      True only for the internal admin token.
+        tier_access:   Tiers this caller can read. Default: ['public', 'project'].
+        entity_id:     Entity identifier for entity-scoped engrams (matches engram.entity_id).
+        role:          Caller's role — 'coordinator' grants tier promotion rights.
     """
 
     workspace_id: Optional[str]
     owner_type: Optional[str]
     owner_id: Optional[str]
     is_admin: bool = field(default=False)
+    tier_access: list[str] = field(default_factory=lambda: ["public", "project"])
+    entity_id: Optional[str] = field(default=None)
+    role: Optional[str] = field(default=None)
 
 
 def _load_tenant_keys(path: str) -> dict[str, dict]:
@@ -102,7 +111,14 @@ def resolve_token_context(
 
     # 1. Admin
     if token == admin_token:
-        return TokenContext(workspace_id=None, owner_type=None, owner_id=None, is_admin=True)
+        return TokenContext(
+            workspace_id=None,
+            owner_type=None,
+            owner_id=None,
+            is_admin=True,
+            tier_access=list(VALID_TIERS),
+            role="coordinator",
+        )
 
     key_hash = hashlib.sha256(token.encode()).hexdigest()
 
@@ -113,11 +129,18 @@ def resolve_token_context(
         if hasattr(_db, "resolve_token_from_db"):
             row = _db.resolve_token_from_db(key_hash)
             if row:
+                _is_admin = row["token_type"] == "admin"
+                _role = row.get("role") or ("coordinator" if _is_admin else None)
+                _tier_access = list(VALID_TIERS) if _is_admin else list(row.get("tier_access") or ["public", "project"])
+                _entity_id = row.get("entity_id") or row.get("workspace_id")
                 return TokenContext(
                     workspace_id=row["workspace_id"],
                     owner_type=row["token_type"],
                     owner_id=row.get("owner_id") or row.get("label"),
-                    is_admin=row["token_type"] == "admin",
+                    is_admin=_is_admin,
+                    tier_access=_tier_access,
+                    entity_id=_entity_id,
+                    role=_role,
                 )
     except Exception as _exc:
         logger.warning("DB token lookup failed: %s", _exc)
@@ -128,11 +151,17 @@ def resolve_token_context(
         entry = keys[key_hash]
         slug = entry["agent_slug"]
         workspace_id = entry.get("workspace_id") or slug
+        _tier_access = list(entry.get("tier_access") or ["public", "project"])
+        _entity_id = entry.get("entity_id") or workspace_id
+        _role = entry.get("role")
         return TokenContext(
             workspace_id=workspace_id,
             owner_type="agent",
             owner_id=slug,
             is_admin=False,
+            tier_access=_tier_access,
+            entity_id=_entity_id,
+            role=_role,
         )
 
     # 4. SOS bus tokens — primary path for all SOS agents
@@ -158,11 +187,17 @@ def resolve_token_context(
             else:
                 workspace_id = sos_ctx.project or "sos"
 
+            _sos_tier_access = list(VALID_TIERS) if sos_is_admin else ["public", "project"]
+            _sos_entity_id = workspace_id
+            _sos_role = "coordinator" if sos_is_admin else None
             return TokenContext(
                 workspace_id=workspace_id,
                 owner_type="agent",
                 owner_id=owner_id,
                 is_admin=sos_is_admin,
+                tier_access=_sos_tier_access,
+                entity_id=_sos_entity_id,
+                role=_sos_role,
             )
     except ImportError:
         pass

@@ -1,18 +1,38 @@
 """
 Embedding cascade for Mirror:
-  1. gemini-embedding-2-preview  (best — MRL native 1536, multimodal)
-  2. gemini-embedding-001         (fallback — proven, free)
-  3. local ONNX via fastembed     (offline/Pi — semantic, 384 dims, ~90 MB model)
-  4. local numpy hash             (last resort — deterministic, zero deps, always works)
+  0. SOS kernel EmbeddingAdapter  (vertex → gemini → local, switchable via EMBEDDING_BACKEND)
+  1. gemini-embedding-2-preview   (best — MRL native 1536, multimodal)
+  2. gemini-embedding-001          (fallback — proven, free)
+  3. local ONNX via fastembed      (offline/Pi — semantic, 384 dims, ~90 MB model)
+  4. local numpy hash              (last resort — deterministic, zero deps, always works)
 """
 
 import hashlib
 import logging
 import os
+import sys
 
 import numpy as np
 
 logger = logging.getLogger("mirror_api")
+
+# ── SOS kernel adapter (Tier 0) ───────────────────────────────────────────────
+# Add SOS to path so Mirror can import without a package install.
+
+_SOS_PATH = os.path.expanduser("~/SOS")
+if _SOS_PATH not in sys.path:
+    sys.path.insert(0, _SOS_PATH)
+
+try:
+    from sos.kernel.embedding_adapter import embed as kernel_embed
+    from sos.kernel.embedding_adapter import EmbeddingError as _KernelEmbeddingError
+    _KERNEL_AVAILABLE = True
+    logger.info("SOS kernel EmbeddingAdapter available — using as Tier 0")
+except ImportError as _e:
+    _KERNEL_AVAILABLE = False
+    kernel_embed = None  # type: ignore[assignment]
+    _KernelEmbeddingError = Exception  # type: ignore[assignment,misc]
+    logger.warning("SOS kernel EmbeddingAdapter not importable (%s); falling back to Mirror cascade", _e)
 
 _DIMS = 1536
 
@@ -63,7 +83,7 @@ def _embed_local_onnx(text: str) -> list[float]:
         logger.info("Local ONNX model loaded (BAAI/bge-small-en-v1.5, 384 dims)")
 
     embeddings = list(_local_onnx_model.embed([text]))
-    emb: list[float] = list(embeddings[0])  # 384 floats
+    emb: list[float] = [float(x) for x in embeddings[0]]  # 384 Python floats (not numpy.float32)
 
     # Zero-pad to _DIMS for index compatibility
     if len(emb) < _DIMS:
@@ -100,12 +120,26 @@ def _embed_local(text: str) -> list[float]:
 
 def get_embedding(text: str) -> list[float]:
     """
-    Cascade: Gemini Embedding 2 → Gemini Embedding 1 → local ONNX → local hash.
+    Cascade:
+      Tier 0 — SOS kernel EmbeddingAdapter (vertex → gemini → local, env-switchable)
+      Tier 1 — gemini-embedding-2-preview
+      Tier 2 — gemini-embedding-001
+      Tier 3 — local ONNX via fastembed (offline / Pi)
+      Tier 4 — local numpy hash (deterministic, always works)
 
     Tiers 1-2 require GEMINI_API_KEY and network access.
     Tier 3 (fastembed) runs fully offline — ideal for Raspberry Pi.
     Tier 4 is deterministic but not semantic; used only as last resort.
     """
+    # ── Tier 0: SOS kernel EmbeddingAdapter ──────────────────────────────────
+    if _KERNEL_AVAILABLE and kernel_embed is not None:
+        try:
+            emb = kernel_embed(text)
+            return emb
+        except Exception as exc:
+            logger.warning("Tier 0 (SOS kernel adapter) failed: %s — falling back to Mirror cascade", exc)
+
+    # ── Tiers 1-4: Mirror-local cascade ──────────────────────────────────────
     for tier, fn in [
         ("gemini-embedding-2-preview", _embed_gemini2),
         ("gemini-embedding-001",       _embed_gemini1),

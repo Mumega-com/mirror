@@ -10,8 +10,9 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
 
-from kernel.auth import TokenContext, resolve_token_context
+from kernel.auth import TokenContext, VALID_TIERS, resolve_token_context
 from kernel.db import get_db
 from kernel.embeddings import get_embedding as _get_embedding
 from kernel.types import EngramResponse, EngramStoreRequest, SearchRequest
@@ -77,14 +78,19 @@ async def search_memory(
     ctx: TokenContext = Depends(_resolve_token),
     x_project_context: Optional[str] = Header(default=None),
 ) -> List[EngramResponse]:
-    """Semantic search across engrams, hard-scoped by workspace_id."""
+    """Semantic search across engrams, hard-scoped by workspace_id and tier RBAC."""
     try:
         # Non-admin tokens are locked to their workspace
         workspace_id = None if ctx.is_admin else ctx.workspace_id
 
+        # Tier access: admin sees all; otherwise use token-resolved tier_access.
+        # Backward-compat: tokens without tier_access field default to ['public', 'project'].
+        tier_access = None if ctx.is_admin else (ctx.tier_access or ["public", "project"])
+        caller_entity_id = None if ctx.is_admin else ctx.entity_id
+
         logger.info(
-            "Search query: '%s' (workspace: %s, admin: %s, x_project_context: %s)",
-            request.query, workspace_id, ctx.is_admin, x_project_context,
+            "Search query: '%s' (workspace: %s, admin: %s, x_project_context: %s, tiers: %s)",
+            request.query, workspace_id, ctx.is_admin, x_project_context, tier_access,
         )
 
         query_embedding = _get_embedding_http(request.query)
@@ -103,6 +109,8 @@ async def search_memory(
                 workspace_id=workspace_id,
                 owner_type="agent",
                 owner_id=ctx.owner_id,
+                tier_access=tier_access,
+                caller_entity_id=caller_entity_id,
             )
             project_rows = db.search_engrams(
                 embedding=query_embedding,
@@ -110,6 +118,8 @@ async def search_memory(
                 limit=internal_limit,
                 owner_type="project",
                 owner_id=x_project_context,
+                tier_access=tier_access,
+                caller_entity_id=caller_entity_id,
             )
             # Deduplicate by id then blend via RRF
             seen: set[str] = set()
@@ -139,6 +149,8 @@ async def search_memory(
                 limit=internal_limit,
                 project=request.project if ctx.is_admin else None,
                 workspace_id=workspace_id,
+                tier_access=tier_access,
+                caller_entity_id=caller_entity_id,
             )
 
         bm25_rows = db.search_bm25(
@@ -172,6 +184,8 @@ async def search_memory(
                     affective_vibe=row.get("affective_vibe", "Unknown"),
                     timestamp=row.get("ts") or row.get("timestamp", ""),
                     text=text,
+                    tier=row.get("tier", "project"),
+                    entity_id=row.get("entity_id"),
                 )
             )
 
@@ -215,6 +229,16 @@ async def store_engram(
 
         embedding = _get_embedding_http(request.text)
 
+        # Validate tier if provided
+        tier = request.tier or "project"
+        if tier not in VALID_TIERS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid tier {tier!r}. Must be one of: {sorted(VALID_TIERS)}",
+            )
+        # entity_id: use request value, fallback to workspace_id
+        entity_id = request.entity_id or workspace_id
+
         data = {
             "context_id": request.context_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -235,6 +259,9 @@ async def store_engram(
                 "metadata": request.metadata,
             },
             "embedding": embedding,
+            "tier": tier,
+            "entity_id": entity_id,
+            "permitted_roles": request.permitted_roles or [],
         }
 
         # Session engrams get low importance so they don't pollute standard recall
@@ -344,3 +371,51 @@ async def get_stats(ctx: TokenContext = Depends(_resolve_token)):
     except Exception as e:
         logger.error("Stats error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tier promotion endpoint — coordinator role required
+# ---------------------------------------------------------------------------
+
+class TierUpdateRequest(BaseModel):
+    tier: str
+
+
+@router.patch("/engrams/{engram_id}/tier")
+async def update_engram_tier(
+    engram_id: str,
+    request: TierUpdateRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """Promote or demote an engram's tier. Requires coordinator role.
+
+    Only callers with role='coordinator' (or is_admin=True) may change tiers.
+    The new tier must be one of: public, squad, project, entity, private.
+    """
+    # Authorization: coordinator role or admin required
+    if not ctx.is_admin and ctx.role != "coordinator":
+        raise HTTPException(
+            status_code=403,
+            detail="Tier updates require coordinator role",
+        )
+
+    new_tier = request.tier
+    if new_tier not in VALID_TIERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid tier {new_tier!r}. Must be one of: {sorted(VALID_TIERS)}",
+        )
+
+    db = _get_db()
+    if not hasattr(db, "update_engram_tier"):
+        raise HTTPException(status_code=501, detail="update_engram_tier not supported by this backend")
+
+    updated = db.update_engram_tier(engram_id, new_tier)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Engram {engram_id!r} not found")
+
+    logger.info(
+        "Tier updated: engram=%s new_tier=%s by %s",
+        engram_id, new_tier, ctx.owner_id or "admin",
+    )
+    return {"status": "updated", "engram_id": engram_id, "tier": new_tier}

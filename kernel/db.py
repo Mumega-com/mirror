@@ -30,6 +30,8 @@ _ALLOWED_COLUMNS = frozenset({
     # mirror_engrams extras
     "series", "timestamp", "content", "embedding", "score", "raw_data", "embedding_model",
     "memory_tier", "importance_score", "reference_count", "archived",
+    # tier access model (migration 016)
+    "tier", "entity_id", "permitted_roles",
     # mirror_code_nodes extras
     "node_id", "repo", "repo_path", "kind", "name", "qualified_name",
     "file_path", "line_start", "line_end", "language", "signature",
@@ -383,6 +385,8 @@ class LocalDB:
         workspace_id: Optional[str] = None,
         owner_type: Optional[str] = None,
         owner_id: Optional[str] = None,
+        tier_access: Optional[List[str]] = None,
+        caller_entity_id: Optional[str] = None,
     ) -> list[dict]:
         if owner_type is not None or owner_id is not None:
             # mirror_match_engrams_v2 doesn't return owner_type/owner_id columns so we
@@ -392,7 +396,7 @@ class LocalDB:
                 SELECT id, context_id, series, project, workspace_id,
                        owner_type, owner_id, importance_score, memory_tier,
                        raw_data, epistemic_truths, core_concepts, affective_vibe,
-                       energy_level, next_attractor,
+                       energy_level, next_attractor, tier, entity_id,
                        timestamp AS ts,
                        1 - (embedding <=> %s::vector) AS similarity
                 FROM mirror_engrams
@@ -409,6 +413,38 @@ class LocalDB:
             if workspace_id:
                 sql += " AND workspace_id = %s"
                 params.append(workspace_id)
+            if tier_access is not None:
+                sql += self._build_tier_sql(tier_access, caller_entity_id, params)
+            sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
+            params.extend([embedding, limit])
+            with self._conn() as conn:
+                with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                    cur.execute(sql, params)
+                    return [dict(r) for r in cur.fetchall()]
+
+        # For the mirror_match_engrams_v2 path we need post-filter on tier since
+        # the stored procedure doesn't know about the new columns. Use direct SQL
+        # when tier_access is specified so filtering is correct.
+        if tier_access is not None:
+            sql = """
+                SELECT id, context_id, series, project, workspace_id,
+                       owner_type, owner_id, importance_score, memory_tier,
+                       raw_data, epistemic_truths, core_concepts, affective_vibe,
+                       energy_level, next_attractor, tier, entity_id,
+                       timestamp AS ts,
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM mirror_engrams
+                WHERE importance_score >= 0.1
+                  AND 1 - (embedding <=> %s::vector) >= %s
+            """
+            params = [embedding, embedding, threshold]
+            if workspace_id:
+                sql += " AND workspace_id = %s"
+                params.append(workspace_id)
+            if project:
+                sql += " AND project = %s"
+                params.append(project)
+            sql += self._build_tier_sql(tier_access, caller_entity_id, params)
             sql += " ORDER BY embedding <=> %s::vector LIMIT %s"
             params.extend([embedding, limit])
             with self._conn() as conn:
@@ -426,6 +462,37 @@ class LocalDB:
                     [embedding, threshold, limit, project, workspace_id],
                 )
                 return [dict(r) for r in cur.fetchall()]
+
+    @staticmethod
+    def _build_tier_sql(
+        tier_access: List[str],
+        caller_entity_id: Optional[str],
+        params: list,
+    ) -> str:
+        """Build a SQL clause fragment for tier-based access control.
+
+        Returns a fragment that starts with ' AND (' so it can be appended
+        directly to an existing WHERE clause. Side-effect: appends bind params
+        to *params*.
+        """
+        if not tier_access:
+            # No accessible tiers → only public
+            return " AND tier = 'public'"
+
+        placeholders = ", ".join(["%s"] * len(tier_access))
+        if caller_entity_id:
+            params.extend(tier_access)
+            params.append(caller_entity_id)
+            return (
+                f" AND (tier = 'public' OR "
+                f"(tier IN ({placeholders}) AND (entity_id = %s OR entity_id IS NULL)))"
+            )
+        else:
+            params.extend(tier_access)
+            return (
+                f" AND (tier = 'public' OR "
+                f"(tier IN ({placeholders}) AND tier != 'entity'))"
+            )
 
     def search_bm25(
         self,
@@ -528,6 +595,22 @@ class LocalDB:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
                 cur.execute(sql, [days_back, min_importance, min_reference_count])
                 return [dict(r) for r in cur.fetchall()]
+
+    def update_engram_tier(self, engram_id: str, new_tier: str) -> Optional[dict]:
+        """Update the tier of an engram. Returns the updated row or None if not found."""
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    UPDATE mirror_engrams
+                    SET tier = %s
+                    WHERE id = %s
+                    RETURNING id, context_id, tier, workspace_id
+                    """,
+                    [new_tier, engram_id],
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
 
     def update_engram_quality(
         self,

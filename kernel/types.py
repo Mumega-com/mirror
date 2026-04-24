@@ -16,6 +16,9 @@ class SearchRequest(BaseModel):
     scope: Optional[str] = None  # "session" | "principal" | "workspace" | "org"
 
 
+VALID_TIERS: frozenset[str] = frozenset({"public", "squad", "project", "entity", "private"})
+
+
 class EngramStoreRequest(BaseModel):
     agent: str  # "river", "knight", "oracle"
     context_id: str
@@ -27,6 +30,10 @@ class EngramStoreRequest(BaseModel):
     energy_level: str = "Balanced"
     next_attractor: str = ""
     metadata: Dict = {}
+    # Tier access model — optional; defaults to 'project' if not provided
+    tier: Optional[str] = None
+    entity_id: Optional[str] = None
+    permitted_roles: Optional[List[str]] = None
 
 
 class EngramResponse(BaseModel):
@@ -40,6 +47,8 @@ class EngramResponse(BaseModel):
     affective_vibe: str
     timestamp: Union[datetime, str]
     text: str = ""
+    tier: str = "project"
+    entity_id: Optional[str] = None
 
 
 class TokenContext(BaseModel):

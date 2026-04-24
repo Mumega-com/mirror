@@ -115,7 +115,10 @@ class SQLiteDB:
                     owner_type       TEXT DEFAULT 'agent',
                     owner_id         TEXT,
                     importance_score REAL DEFAULT 1.0,
-                    memory_tier      TEXT DEFAULT 'episodic'
+                    memory_tier      TEXT DEFAULT 'episodic',
+                    tier             TEXT NOT NULL DEFAULT 'project',
+                    entity_id        TEXT,
+                    permitted_roles  TEXT DEFAULT '[]'
                 )
             """)
 
@@ -123,11 +126,21 @@ class SQLiteDB:
             for col, definition in [
                 ("importance_score", "REAL DEFAULT 1.0"),
                 ("memory_tier",      "TEXT DEFAULT 'episodic'"),
+                ("tier",             "TEXT NOT NULL DEFAULT 'project'"),
+                ("entity_id",        "TEXT"),
+                ("permitted_roles",  "TEXT DEFAULT '[]'"),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE mirror_engrams ADD COLUMN {col} {definition}")
                 except Exception:
                     pass  # column already exists
+
+            # Backfill: set entity_id = workspace_id where entity_id is NULL
+            conn.execute("""
+                UPDATE mirror_engrams
+                SET entity_id = workspace_id
+                WHERE entity_id IS NULL AND workspace_id IS NOT NULL
+            """)
 
             # sqlite-vec virtual table — stores embeddings alongside engram ids
             conn.execute(f"""
@@ -172,6 +185,8 @@ class SQLiteDB:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_project ON mirror_engrams(project)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_workspace ON mirror_engrams(workspace_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_owner ON mirror_engrams(workspace_id, owner_type, owner_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_tier ON mirror_engrams(tier)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_entity_id ON mirror_engrams(entity_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_code_repo ON mirror_code_nodes(repo)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_code_kind ON mirror_code_nodes(kind)")
 
@@ -185,6 +200,8 @@ class SQLiteDB:
         d["epistemic_truths"] = json.loads(d.get("epistemic_truths") or "[]")
         d["core_concepts"] = json.loads(d.get("core_concepts") or "[]")
         d["raw_data"] = json.loads(d.get("raw_data") or "{}")
+        d["permitted_roles"] = json.loads(d.get("permitted_roles") or "[]")
+        d.setdefault("tier", "project")
         return d
 
     # ── Engrams ───────────────────────────────────────────────────────────────
@@ -194,19 +211,29 @@ class SQLiteDB:
         embedding: Optional[list[float]] = data.pop("embedding", None)
         context_id: str = data["context_id"]
 
+        # Validate tier value before inserting
+        tier = data.get("tier", "project")
+        if tier not in {"public", "squad", "project", "entity", "private"}:
+            raise ValueError(f"Invalid tier: {tier!r}. Must be one of: public, squad, project, entity, private")
+
+        # entity_id defaults to workspace_id when not explicitly set
+        entity_id = data.get("entity_id") or data.get("workspace_id")
+
         with self._conn() as conn:
             conn.execute("""
                 INSERT INTO mirror_engrams
                     (id, context_id, timestamp, series, epistemic_truths, core_concepts,
                      affective_vibe, energy_level, next_attractor, raw_data, project,
-                     workspace_id, owner_type, owner_id, importance_score, memory_tier)
+                     workspace_id, owner_type, owner_id, importance_score, memory_tier,
+                     tier, entity_id, permitted_roles)
                 VALUES (
                     coalesce(:id, lower(hex(randomblob(16)))),
                     :context_id, :timestamp, :series,
                     :epistemic_truths, :core_concepts, :affective_vibe,
                     :energy_level, :next_attractor, :raw_data, :project,
                     :workspace_id, :owner_type, :owner_id,
-                    :importance_score, :memory_tier
+                    :importance_score, :memory_tier,
+                    :tier, :entity_id, :permitted_roles
                 )
                 ON CONFLICT(context_id) DO UPDATE SET
                     series           = excluded.series,
@@ -221,7 +248,10 @@ class SQLiteDB:
                     owner_type       = excluded.owner_type,
                     owner_id         = excluded.owner_id,
                     importance_score = excluded.importance_score,
-                    memory_tier      = excluded.memory_tier
+                    memory_tier      = excluded.memory_tier,
+                    tier             = excluded.tier,
+                    entity_id        = excluded.entity_id,
+                    permitted_roles  = excluded.permitted_roles
             """, {
                 "id":               data.get("id"),
                 "context_id":       context_id,
@@ -239,6 +269,9 @@ class SQLiteDB:
                 "owner_id":         data.get("owner_id"),
                 "importance_score": data.get("importance_score", 1.0),
                 "memory_tier":      data.get("memory_tier", "episodic"),
+                "tier":             tier,
+                "entity_id":        entity_id,
+                "permitted_roles":  json.dumps(data.get("permitted_roles") or []),
             })
 
             # Resolve the actual id (needed for vec0 FK)
@@ -270,6 +303,8 @@ class SQLiteDB:
         workspace_id: Optional[str] = None,
         owner_type: Optional[str] = None,
         owner_id: Optional[str] = None,
+        tier_access: Optional[list[str]] = None,
+        caller_entity_id: Optional[str] = None,
     ) -> list[dict]:
         """
         Cosine similarity search via sqlite-vec.
@@ -329,6 +364,30 @@ class SQLiteDB:
                 filters.append("e.series LIKE ?")
                 params.append(f"%{series}%")
 
+            # Tier RBAC: caller can only see tiers they have access to.
+            # public is always visible.
+            # entity-scoped engrams additionally require entity_id match.
+            if tier_access is not None:
+                accessible = list(tier_access)
+                if accessible:
+                    ph = ",".join("?" * len(accessible))
+                    if caller_entity_id:
+                        filters.append(
+                            f"(e.tier = 'public' OR "
+                            f"(e.tier IN ({ph}) AND (e.entity_id = ? OR e.entity_id IS NULL)))"
+                        )
+                        params.extend(accessible)
+                        params.append(caller_entity_id)
+                    else:
+                        filters.append(
+                            f"(e.tier = 'public' OR "
+                            f"(e.tier IN ({ph}) AND e.tier != 'entity'))"
+                        )
+                        params.extend(accessible)
+                else:
+                    # Empty tier_access list → only public engrams
+                    filters.append("e.tier = 'public'")
+
             where = " AND ".join(filters)
             rows = conn.execute(
                 f"SELECT * FROM mirror_engrams e WHERE {where}", params
@@ -343,6 +402,21 @@ class SQLiteDB:
 
             results.sort(key=lambda x: x["similarity"], reverse=True)
             return results[:limit]
+
+    def update_engram_tier(self, engram_id: str, new_tier: str) -> Optional[dict]:
+        """Update the tier of an engram. Returns the updated row or None if not found."""
+        if new_tier not in {"public", "squad", "project", "entity", "private"}:
+            raise ValueError(f"Invalid tier: {new_tier!r}")
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE mirror_engrams SET tier = ? WHERE id = ?",
+                (new_tier, engram_id),
+            )
+            row = conn.execute(
+                "SELECT id, context_id, tier, workspace_id FROM mirror_engrams WHERE id = ?",
+                (engram_id,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def recent_engrams(
         self,
