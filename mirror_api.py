@@ -576,6 +576,67 @@ if __name__ == "__main__":
     logger.info("Mirror SOS registration thread started")
     # --- end SOS Service Registry ---
 
+    # --- Hot-Store Monitor ---
+    # Polls unarchived engram count every 5 minutes.
+    # Publishes to Redis channel "mirror.hot_store_threshold_exceeded" when count
+    # crosses MIRROR_HOT_STORE_THRESHOLD. Hysteresis: emits once per crossing,
+    # not on every poll above threshold. Dreamer listener subscribes and fires.
+    def _hot_store_monitor() -> None:
+        _threshold = int(os.getenv("MIRROR_HOT_STORE_THRESHOLD", "100000"))
+        _poll_interval = int(os.getenv("MIRROR_HOT_STORE_POLL_SECONDS", "300"))
+        _above = False  # hysteresis state
+        try:
+            import redis as _redis
+            import psycopg2
+            _r = _redis.Redis(
+                host=os.getenv("REDIS_HOST", "localhost"),
+                password=os.getenv("REDIS_PASSWORD", ""),
+                decode_responses=True,
+            )
+            _dsn = os.getenv("MIRROR_DATABASE_URL") or os.getenv("DATABASE_URL", "")
+            logger.info("Hot-store monitor started (threshold=%d, poll=%ds)", _threshold, _poll_interval)
+            while True:
+                try:
+                    with psycopg2.connect(_dsn) as _conn:
+                        with _conn.cursor() as _cur:
+                            _cur.execute(
+                                "SELECT COUNT(*) FROM mirror_engrams WHERE archived = false"
+                            )
+                            (_count,) = _cur.fetchone()
+                    if _count >= _threshold and not _above:
+                        _above = True
+                        _payload = json.dumps({
+                            "event": "mirror.hot_store_threshold_exceeded",
+                            "count": _count,
+                            "threshold": _threshold,
+                            "source": "mirror",
+                            "ts": datetime.utcnow().isoformat() + "Z",
+                        })
+                        _r.publish("mirror.hot_store_threshold_exceeded", _payload)
+                        logger.warning(
+                            "Hot-store threshold exceeded: %d engrams (threshold=%d). "
+                            "Dreamer trigger published.",
+                            _count, _threshold,
+                        )
+                    elif _count < _threshold and _above:
+                        _above = False  # reset hysteresis after Dreamer drains the store
+                        logger.info("Hot-store back below threshold: %d engrams", _count)
+                    else:
+                        logger.debug("Hot-store count: %d / %d", _count, _threshold)
+                except Exception as _e:
+                    logger.warning("Hot-store monitor poll error: %s", _e)
+                time.sleep(_poll_interval)
+        except ImportError as _e:
+            logger.warning("Hot-store monitor disabled (missing dep): %s", _e)
+
+    threading.Thread(
+        target=_hot_store_monitor,
+        daemon=True,
+        name="mirror-hot-store-monitor",
+    ).start()
+    logger.info("Mirror hot-store monitor thread started")
+    # --- end Hot-Store Monitor ---
+
     # --- Bus Subscriber ---
     try:
         import importlib.util as _ilu

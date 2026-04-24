@@ -226,14 +226,61 @@ def print_stats() -> None:
     print()
 
 
+def listen() -> None:
+    """Subscribe to mirror.hot_store_threshold_exceeded and fire run() on each signal.
+
+    Runs indefinitely as a persistent service (mirror-dreamer-listener.service).
+    The nightly timer (mirror-dreamer.timer) continues to run independently.
+    """
+    import time as _time
+    try:
+        import redis as _redis
+    except ImportError:
+        logger.error("redis package not available — cannot start listener")
+        sys.exit(1)
+
+    redis_host = os.environ.get("REDIS_HOST", "localhost")
+    redis_password = os.environ.get("REDIS_PASSWORD", "")
+    channel = "mirror.hot_store_threshold_exceeded"
+
+    r = _redis.Redis(host=redis_host, password=redis_password, decode_responses=True)
+    pubsub = r.pubsub()
+    pubsub.subscribe(channel)
+    logger.info("Dreamer listener subscribed to '%s'", channel)
+
+    for message in pubsub.listen():
+        if message["type"] != "message":
+            continue
+        logger.info("Event-triggered Dreamer run (signal: %s)", message.get("data", "")[:120])
+        try:
+            summary = run()
+            if "error" in summary:
+                logger.error("Event-triggered Dreamer run failed: %s", summary["error"])
+            else:
+                logger.info(
+                    "Event-triggered run complete: processed=%d promoted=%d archived=%d",
+                    summary.get("total_processed", 0),
+                    sum(summary.get("promoted", {}).values()),
+                    summary.get("archived", 0),
+                )
+        except Exception as _e:
+            logger.error("Event-triggered Dreamer run raised: %s", _e)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Mirror Dreamer — nightly memory consolidation")
     parser.add_argument("--dry-run", action="store_true", help="Preview only — no writes")
     parser.add_argument("--stats", action="store_true", help="Print tier distribution and exit")
+    parser.add_argument("--listen", action="store_true",
+                        help="Run as persistent listener, firing on hot-store threshold events")
     args = parser.parse_args()
 
     if args.stats:
         print_stats()
+        return
+
+    if args.listen:
+        listen()
         return
 
     summary = run(dry_run=args.dry_run)
