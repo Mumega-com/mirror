@@ -4,6 +4,17 @@ Lambda Tensor — LSB steganography for embedding 16D vectors into PNG avatars.
 Encodes agent DNA (JSON) into the least-significant bits of image pixels.
 The image looks identical to the naked eye but carries the agent's full genetic code.
 
+--- Basis discipline (G_A4b / §16a) ---
+This module works with the substrate's single canonical 16D vector space:
+**lambda_dna** (Torivers.16D.001). Any 16D vector that participates in cosine
+similarity, dot product, or scalarization against another vector MUST be in this
+basis. The 16 axis labels and their group semantics are defined canonically at
+`/home/mumega/infra/shared-kb/frc/CANONICAL.md` (Torivers.16D.001 section —
+Group A: Structural Stability, Group B: Semantic Integrity, Group C: Functional
+Alignment, Group D: Coherence Control). Do not source axis labels from this file —
+this file encodes *representations* of the vector, not the vector's coordinate
+semantics. The basis lives in the canonical KB.
+
 Requires: Pillow, numpy
 """
 
