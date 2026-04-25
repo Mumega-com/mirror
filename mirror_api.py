@@ -325,13 +325,59 @@ async def root():
     }
 
 
+# G71: track last health status per-process for transition-only emit
+_last_health_status: str | None = None
+
+
 @app.get("/health")
 async def health():
-    """Lightweight health check — verifies DB connectivity and reports plugin status."""
+    """G71 — nginx upstream health check. 1s DB ping; DEBUG logging; 503 on unhealthy.
+
+    Response: {"status": "healthy"|"unhealthy", "db_reachable": bool,
+               "instance_id": "<MIRROR_PORT>", "db_reachable_ms": float}
+    HTTP 200 when healthy; 503 when unhealthy.
+    Emits emit_mirror_health() to sprint_telemetry on status transition only.
+    """
+    import logging as _log
+    global _last_health_status
+
     from kernel.health import health_check
-    from plugins.loader import summary
+    from fastapi.responses import JSONResponse
+
     status = await health_check(db)
-    return {"status": status.status, "service": status.service, "plugins": summary()}
+    instance_id = os.getenv("MIRROR_PORT", "unknown")
+    prev = _last_health_status
+    _last_health_status = status.status
+
+    _log.getLogger("mirror.health").debug(
+        "health: instance=%s status=%s db_ms=%.1f",
+        instance_id, status.status, status.db_reachable_ms,
+    )
+
+    # Transition-only emit — never crashes health endpoint
+    if prev is not None and prev != status.status:
+        try:
+            import sys as _sys
+            _sys.path.insert(0, "/home/mumega/SOS")
+            from sos.observability.sprint_telemetry import emit_mirror_health
+            emit_mirror_health(
+                instance_id=instance_id,
+                prev_status=prev,
+                new_status=status.status,
+                db_reachable_ms=status.db_reachable_ms,
+            )
+        except Exception:
+            pass
+
+    body = {
+        "status": status.status,
+        "db_reachable": status.db_reachable,
+        "instance_id": instance_id,
+        "db_reachable_ms": status.db_reachable_ms,
+    }
+    if status.status == "healthy":
+        return body
+    return JSONResponse(status_code=503, content=body)
 
 
 # --- ENHANCED MEMORY ENDPOINTS (Mem0-inspired) ---
