@@ -21,12 +21,16 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
-from google import genai
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("mirror_code_sync")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Embedding via SOS kernel adapter (vertex → gemini → local cascade; no API key needed)
+import sys as _sys
+_SOS_PATH = str(Path.home() / "SOS")
+if _SOS_PATH not in _sys.path:
+    _sys.path.insert(0, _SOS_PATH)
+from sos.kernel.embedding_adapter import embed as _kernel_embed
+
 REGISTRY_PATH = Path.home() / ".code-review-graph" / "registry.json"
 
 # Only embed these node kinds — skip noise
@@ -39,13 +43,8 @@ EMBED_DELAY = 0.1  # seconds between embedding calls (rate limit)
 
 
 def get_embedding(text: str) -> list[float]:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    result = client.models.embed_content(
-        model="gemini-embedding-001",
-        contents=text[:8000],
-    )
-    emb = list(result.embeddings[0].values)
-    return emb[:1536]
+    """Embed via SOS kernel cascade: vertex → gemini → local. No API key required."""
+    return _kernel_embed(text[:8192])
 
 
 def repo_short_name(repo_path: str) -> str:
@@ -154,8 +153,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Show what would be synced without writing")
     args = parser.parse_args()
 
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY required")
+    # No API key required — Vertex ADC or local fastembed via kernel cascade
 
     import sys
     sys.path.insert(0, str(Path(__file__).parent))

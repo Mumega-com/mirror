@@ -2,9 +2,20 @@
 """Mirror migration runner with schema_migrations tracking.
 
 Usage:
-    python scripts/migrate.py            # apply all pending migrations
-    python scripts/migrate.py --status   # show applied/pending without running
-    python scripts/migrate.py --dry-run  # print SQL that would run, no writes
+    python scripts/migrate.py --target mirror             # apply to Mirror localhost (DEFAULT)
+    python scripts/migrate.py --target supabase           # apply to Supabase (app layer)
+    python scripts/migrate.py --target mirror --status    # show applied/pending without running
+    python scripts/migrate.py --target mirror --dry-run   # print SQL, no writes
+
+IMPORTANT: --target is required when running against any live database.
+The script prints the target host before connecting — verify it before proceeding.
+
+Targets:
+    mirror    postgresql://mirror:***@localhost:5432/mirror
+    supabase  postgresql://postgres:***@db.nnolqgvuvoxkofbitunb.supabase.co:5432/postgres
+
+If --target is omitted the script falls back to env-var lookup (legacy mode).
+Env-var lookup is unsafe when .env files may have been rewritten — use --target.
 """
 from __future__ import annotations
 
@@ -13,7 +24,6 @@ import hashlib
 import logging
 import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -32,6 +42,22 @@ import psycopg2.extras
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("migrate")
 
+# ---------------------------------------------------------------------------
+# Known targets — bypasses env-var lookup entirely, prevents wrong-DB errors.
+# Credentials sourced from memory/reference_credentials.md (not from any .env).
+# ---------------------------------------------------------------------------
+_KNOWN_TARGETS: dict[str, tuple[str, str]] = {
+    # target_name: (dsn, display_label)
+    "mirror":   (
+        "postgresql://mirror:mirror_local_2026@localhost:5432/mirror",
+        "Mirror localhost:5432/mirror",
+    ),
+    "supabase": (
+        "postgresql://postgres:UnnamedTao%408%40@db.nnolqgvuvoxkofbitunb.supabase.co:5432/postgres",
+        "Supabase db.nnolqgvuvoxkofbitunb.supabase.co:5432/postgres",
+    ),
+}
+
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 
 BOOTSTRAP = """
@@ -43,12 +69,37 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 
-def _dsn() -> str:
-    dsn = os.environ.get("MIRROR_DATABASE_URL") or os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_CONNECTION_STRING", "")
+def _dsn(target: str | None) -> tuple[str, str]:
+    """Return (dsn, display_label) for the given target.
+
+    If *target* is a known name, bypass env-var lookup entirely (safe).
+    If *target* is None, fall back to env-var lookup with a loud warning.
+    """
+    if target is not None:
+        if target in _KNOWN_TARGETS:
+            return _KNOWN_TARGETS[target]
+        logger.error(
+            "Unknown --target %r. Known targets: %s",
+            target,
+            ", ".join(_KNOWN_TARGETS),
+        )
+        sys.exit(1)
+
+    # Legacy fallback — warn loudly that this is unsafe.
+    logger.warning(
+        "No --target specified. Reading DATABASE_URL from environment. "
+        "This is UNSAFE if .env files have been rewritten by another agent. "
+        "Pass --target mirror or --target supabase to be explicit."
+    )
+    dsn = (
+        os.environ.get("MIRROR_DATABASE_URL")
+        or os.environ.get("DATABASE_URL")
+        or os.environ.get("SUPABASE_CONNECTION_STRING", "")
+    )
     if not dsn:
         logger.error("No DATABASE_URL / MIRROR_DATABASE_URL / SUPABASE_CONNECTION_STRING set")
         sys.exit(1)
-    return dsn
+    return dsn, "(from environment — unverified)"
 
 
 def _all_files() -> list[Path]:
@@ -62,8 +113,15 @@ def _applied(conn) -> set[str]:
         return {row[0] for row in cur.fetchall()}
 
 
-def status() -> None:
-    conn = psycopg2.connect(_dsn())
+def _connect_with_banner(target: str | None) -> psycopg2.extensions.connection:
+    """Resolve DSN, print a safety banner, and open a connection."""
+    dsn, label = _dsn(target)
+    logger.info("TARGET: %s", label)
+    return psycopg2.connect(dsn)
+
+
+def status(target: str | None) -> None:
+    conn = _connect_with_banner(target)
     try:
         with conn:
             with conn.cursor() as cur:
@@ -81,10 +139,9 @@ def status() -> None:
         conn.close()
 
 
-def run(dry_run: bool = False) -> None:
-    conn = psycopg2.connect(_dsn())
+def run(target: str | None, dry_run: bool = False) -> None:
+    conn = _connect_with_banner(target)
     try:
-        # Bootstrap tracking table
         with conn:
             with conn.cursor() as cur:
                 cur.execute(BOOTSTRAP)
@@ -124,14 +181,24 @@ def run(dry_run: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Mirror migration runner")
+    parser.add_argument(
+        "--target",
+        choices=[*_KNOWN_TARGETS],
+        default=None,
+        help=(
+            "Explicit database target — bypasses env-var lookup (recommended). "
+            f"Choices: {', '.join(_KNOWN_TARGETS)}. "
+            "Omit only if you are certain the environment is clean."
+        ),
+    )
     parser.add_argument("--status", action="store_true", help="Show applied/pending without running")
     parser.add_argument("--dry-run", action="store_true", help="Print SQL, no writes")
     args = parser.parse_args()
 
     if args.status:
-        status()
+        status(args.target)
     else:
-        run(dry_run=args.dry_run)
+        run(args.target, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

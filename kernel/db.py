@@ -217,7 +217,7 @@ class _LocalTable:
         # Handle complex types for JSON
         row = dict(self._data)
         for k, v in row.items():
-            if isinstance(v, (dict, list)) and k not in ('epistemic_truths', 'core_concepts', 'labels', 'blocked_by', 'blocks', 'tags'):
+            if isinstance(v, (dict, list)) and k not in ('epistemic_truths', 'core_concepts', 'labels', 'blocked_by', 'blocks', 'tags', 'permitted_roles'):
                 row[k] = self._db._extras.Json(v)
 
         with self._db._conn() as conn:
@@ -256,7 +256,7 @@ class _LocalTable:
         
         row = dict(self._data)
         for k, v in row.items():
-            if isinstance(v, (dict, list)) and k not in ('epistemic_truths', 'core_concepts', 'labels', 'blocked_by', 'blocks', 'tags'):
+            if isinstance(v, (dict, list)) and k not in ('epistemic_truths', 'core_concepts', 'labels', 'blocked_by', 'blocks', 'tags', 'permitted_roles'):
                 row[k] = self._db._extras.Json(v)
 
         with self._db._conn() as conn:
