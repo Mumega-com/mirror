@@ -541,11 +541,12 @@ if __name__ == "__main__":
     # Daemon thread dies automatically when the process exits.
     def _register_with_sos() -> None:
         """Write Mirror's registration to sos:registry:service:mirror every 30s."""
+        _reg_port = int(os.getenv('MIRROR_PORT', '8844'))
         payload = json.dumps({
             "name": "mirror",
-            "port": 8844,
+            "port": _reg_port,
             "version": "2.0.0",
-            "health": "http://localhost:8844/health",
+            "health": f"http://localhost:{_reg_port}/health",
             "capabilities": ["remember", "recall", "search_code"],
             "kernel": "mirror",
             "pid": os.getpid(),
