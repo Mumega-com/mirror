@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     action      TEXT NOT NULL,          -- verb: 'created','updated','deleted','granted','denied','minted',...
     resource    TEXT NOT NULL,          -- e.g. 'engram:abc123', 'role_assignment:xyz'
     payload     JSONB,                  -- redacted snapshot; MUST be ≤8KB at emission (app-enforced)
+    payload_redacted BOOLEAN NOT NULL DEFAULT false,  -- true when payload was replaced with {summary, hash_of_full}
     prev_hash   BYTEA,                  -- NULL for genesis event of each stream
     hash        BYTEA NOT NULL,         -- SHA-256(prev_hash_bytes || canonical_json(event minus hash))
     signature   BYTEA,                  -- Ed25519(hash); mandatory for stream_id='dispatcher', optional elsewhere
