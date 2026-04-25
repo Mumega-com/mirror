@@ -34,7 +34,11 @@ CREATE TABLE mfa_used_codes (
 -- (Partial indexes using now() are not IMMUTABLE; plain btree index is correct)
 CREATE INDEX mfa_used_codes_cleanup_idx ON mfa_used_codes (used_at);
 
--- Revoke public write access — append-only via MFA service role only
+-- Revoke public write access — restricted via MFA service role only
 -- (Adjust role name to match deployment; 'mirror' is the app user in local/prod)
+-- INSERT: verification path writes used codes.
+-- DELETE: cleanup job removes entries older than 5 minutes.
+-- UPDATE: never permitted — a used code is used once; no UPDATE is legitimate.
 REVOKE INSERT, UPDATE, DELETE ON mfa_used_codes FROM PUBLIC;
-GRANT INSERT ON mfa_used_codes TO mirror;
+GRANT INSERT, DELETE ON mfa_used_codes TO mirror;
+GRANT SELECT ON mfa_used_codes TO mirror;
