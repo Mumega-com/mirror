@@ -18,7 +18,7 @@
 
 CREATE TABLE IF NOT EXISTS contracts (
     id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    principal_id       UUID        REFERENCES principals(id) ON DELETE RESTRICT,
+    principal_id       TEXT        REFERENCES principals(id) ON DELETE RESTRICT,
     tenant_slug        TEXT,                                     -- populated after tenant provision (E.3)
     stripe_customer_id TEXT,
     stripe_quote_id    TEXT        UNIQUE NOT NULL,              -- idempotency key for Stripe replays
