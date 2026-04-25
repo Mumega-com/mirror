@@ -650,9 +650,10 @@ if __name__ == "__main__":
         logger.warning("Bus subscriber failed to start: %s", _e)
     # --- end Bus Subscriber ---
 
+    _port = int(os.getenv('MIRROR_PORT', '8844'))
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8844,  # Mirror API port
+        port=_port,
         log_level="info"
     )
