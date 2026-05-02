@@ -6,6 +6,7 @@ from typing import Any
 from kernel.auth import TokenContext
 from kernel.db import get_db
 from kernel.embeddings import get_embedding
+from kernel.receipts import emit_mirror_engram_write_receipt
 
 # ---------------------------------------------------------------------------
 # Tool schemas (MCP spec format)
@@ -99,7 +100,7 @@ def call_tool(name: str, arguments: dict, ctx: TokenContext) -> dict:
         text = arguments["text"]
         agent = arguments.get("agent", ctx.owner_id or "mcp-client")
         embedding = get_embedding(text)
-        db.upsert_engram({
+        data = {
             "context_id": context_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "series": f"{agent.title()} - MCP Client",
@@ -111,10 +112,20 @@ def call_tool(name: str, arguments: dict, ctx: TokenContext) -> dict:
             "affective_vibe": arguments.get("affective_vibe", "Neutral"),
             "energy_level": "Balanced",
             "next_attractor": "",
-            "raw_data": {"agent": agent, "text": text},
+            "raw_data": {
+                "agent": agent,
+                "text": text,
+                "metadata": arguments.get("metadata", {}),
+            },
             "embedding": embedding,
+        }
+        db.upsert_engram(data)
+        receipt = emit_mirror_engram_write_receipt(data, actor=agent)
+        return _content({
+            "stored": True,
+            "context_id": context_id,
+            "receipt": receipt.get("receipt") if isinstance(receipt, dict) else None,
         })
-        return _content({"stored": True, "context_id": context_id})
 
     elif name == "memory_recent":
         agent = arguments.get("agent", ctx.owner_id or "mcp-client")

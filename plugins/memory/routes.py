@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from kernel.auth import TokenContext, VALID_TIERS, resolve_token_context
 from kernel.db import get_db
 from kernel.embeddings import get_embedding as _get_embedding
+from kernel.receipts import emit_mirror_engram_write_receipt
 from kernel.types import EngramResponse, EngramStoreRequest, SearchRequest
 
 logger = logging.getLogger("mirror.memory")
@@ -292,6 +293,8 @@ async def store_engram(
         if not merged:
             db.upsert_engram(data)
 
+        receipt = emit_mirror_engram_write_receipt(data, merged=merged, actor=agent)
+
         logger.info("Stored engram: %s (merged=%s)", request.context_id, merged)
         return {
             "status": "success",
@@ -299,6 +302,7 @@ async def store_engram(
             "agent": agent,
             "workspace_id": workspace_id,
             "merged": merged,
+            "receipt": receipt.get("receipt") if isinstance(receipt, dict) else None,
         }
 
     except HTTPException:
