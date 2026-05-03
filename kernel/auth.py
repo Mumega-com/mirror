@@ -8,6 +8,7 @@ This is the single source of truth for all auth decisions in Mirror.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -110,7 +111,10 @@ def resolve_token_context(
         raise HTTPException(status_code=401, detail="Authorization required")
 
     # 1. Admin
-    if token == admin_token:
+    # Constant-time comparison — F-16 elevated this from rare-call to
+    # remote-reachable surface (/admin/outbox/status, /admin/outbox/dlq).
+    # Adversarial-gate hardening BLOCK-P1-6.
+    if hmac.compare_digest(token or "", admin_token or ""):
         return TokenContext(
             workspace_id=None,
             owner_type=None,

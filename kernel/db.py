@@ -357,6 +357,67 @@ class LocalDB:
         data.setdefault("embedding_model", "gemini-embedding-2-preview")
         self.table("mirror_engrams").upsert(data, on_conflict="context_id").execute()
 
+    def upsert_engram_with_outbox(
+        self,
+        data: dict,
+        receipt_payload: dict,
+        outbox: Any,
+    ) -> int:
+        """Atomic engram upsert + outbox enqueue (S024 F-16).
+
+        Single explicit transaction binds the engram row and the
+        `mirror_pending_receipts` row together: either both land or
+        neither does. Returns the outbox row id so the caller can
+        report it for forensics.
+
+        *outbox* must be a `kernel.outbox.OutboxBackend` whose
+        `enqueue(conn, payload)` accepts an external psycopg2
+        connection (i.e. `NativeSqlOutbox`).
+        """
+        data.setdefault("embedding_model", "gemini-embedding-2-preview")
+
+        # Build the same INSERT/ON CONFLICT shape as _execute_upsert,
+        # but inline so we control the transaction boundary.
+        for k in data.keys():
+            _validate_identifier(k, _ALLOWED_COLUMNS, "column")
+        columns = ", ".join(data.keys())
+        placeholders = ", ".join(f"%({k})s" for k in data.keys())
+        updates = ", ".join(
+            f"{k} = EXCLUDED.{k}" for k in data.keys() if k != "context_id"
+        )
+        sql = (
+            f"INSERT INTO mirror_engrams ({columns}) "
+            f"VALUES ({placeholders}) "
+            f"ON CONFLICT (context_id) DO UPDATE SET {updates} "
+            f"RETURNING id"
+        )
+
+        row = dict(data)
+        for k, v in row.items():
+            if isinstance(v, (dict, list)) and k not in (
+                "epistemic_truths", "core_concepts", "labels",
+                "blocked_by", "blocks", "tags", "permitted_roles",
+            ):
+                row[k] = self._extras.Json(v)
+
+        conn = self._pool.getconn()
+        try:
+            conn.autocommit = False
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, row)
+                    cur.fetchone()  # consume RETURNING id
+                outbox_id = outbox.enqueue(conn, receipt_payload)
+                conn.commit()
+                return outbox_id
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.autocommit = True
+        finally:
+            self._pool.putconn(conn)
+
     def merge_engram(self, engram_id: str, new_text: str, new_metadata: dict) -> None:
         """Merge new content into an existing near-duplicate engram.
 

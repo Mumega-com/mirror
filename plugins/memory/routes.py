@@ -15,7 +15,8 @@ from pydantic import BaseModel
 from kernel.auth import TokenContext, VALID_TIERS, resolve_token_context
 from kernel.db import get_db
 from kernel.embeddings import get_embedding as _get_embedding
-from kernel.receipts import emit_mirror_engram_write_receipt
+from kernel.outbox import is_outbox_enabled, make_outbox
+from kernel.receipts import build_mirror_engram_write_receipt, emit_mirror_engram_write_receipt
 from kernel.types import EngramResponse, EngramStoreRequest, SearchRequest
 
 logger = logging.getLogger("mirror.memory")
@@ -290,12 +291,34 @@ async def store_engram(
                 )
                 merged = True
 
+        # F-16: when the outbox is enabled and the underlying DB supports
+        # the atomic-write extension (`upsert_engram_with_outbox`), bind
+        # the engram write and the receipt enqueue in one transaction.
+        # Otherwise fall back to the legacy fire-and-forget receipt path
+        # — same surface, same silent-fail-open behaviour as before.
+        outbox_id: Optional[int] = None
+        receipt = None
         if not merged:
-            db.upsert_engram(data)
+            if is_outbox_enabled() and hasattr(db, "upsert_engram_with_outbox"):
+                payload = build_mirror_engram_write_receipt(data, merged=False, actor=agent)
+                # require_durable=True: refuse a process-local MemoryOutbox
+                # for the atomic-txn helper (BLOCK-P1-7).
+                outbox = make_outbox(db, require_durable=True)
+                outbox_id = db.upsert_engram_with_outbox(data, payload, outbox)
+            else:
+                db.upsert_engram(data)
+                receipt = emit_mirror_engram_write_receipt(data, merged=False, actor=agent)
+        else:
+            # Merge path doesn't write a new engram row, so the outbox
+            # binding has nothing to atomically pair with — keep the
+            # legacy emit. This is acceptable because merges don't
+            # produce new audit objects, only ref-count bumps.
+            receipt = emit_mirror_engram_write_receipt(data, merged=True, actor=agent)
 
-        receipt = emit_mirror_engram_write_receipt(data, merged=merged, actor=agent)
-
-        logger.info("Stored engram: %s (merged=%s)", request.context_id, merged)
+        logger.info(
+            "Stored engram: %s (merged=%s outbox_id=%s)",
+            request.context_id, merged, outbox_id,
+        )
         return {
             "status": "success",
             "context_id": request.context_id,
@@ -303,6 +326,7 @@ async def store_engram(
             "workspace_id": workspace_id,
             "merged": merged,
             "receipt": receipt.get("receipt") if isinstance(receipt, dict) else None,
+            "outbox_id": outbox_id,
         }
 
     except HTTPException:

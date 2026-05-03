@@ -6,7 +6,8 @@ from typing import Any
 from kernel.auth import TokenContext
 from kernel.db import get_db
 from kernel.embeddings import get_embedding
-from kernel.receipts import emit_mirror_engram_write_receipt
+from kernel.outbox import is_outbox_enabled, make_outbox
+from kernel.receipts import build_mirror_engram_write_receipt, emit_mirror_engram_write_receipt
 
 # ---------------------------------------------------------------------------
 # Tool schemas (MCP spec format)
@@ -119,12 +120,23 @@ def call_tool(name: str, arguments: dict, ctx: TokenContext) -> dict:
             },
             "embedding": embedding,
         }
-        db.upsert_engram(data)
-        receipt = emit_mirror_engram_write_receipt(data, actor=agent)
+        # F-16: route through outbox when enabled, else legacy fire-and-forget.
+        outbox_id = None
+        receipt = None
+        if is_outbox_enabled() and hasattr(db, "upsert_engram_with_outbox"):
+            payload = build_mirror_engram_write_receipt(data, actor=agent)
+            # require_durable=True: refuse process-local MemoryOutbox for
+            # the atomic-txn helper (BLOCK-P1-7).
+            outbox = make_outbox(db, require_durable=True)
+            outbox_id = db.upsert_engram_with_outbox(data, payload, outbox)
+        else:
+            db.upsert_engram(data)
+            receipt = emit_mirror_engram_write_receipt(data, actor=agent)
         return _content({
             "stored": True,
             "context_id": context_id,
             "receipt": receipt.get("receipt") if isinstance(receipt, dict) else None,
+            "outbox_id": outbox_id,
         })
 
     elif name == "memory_recent":
