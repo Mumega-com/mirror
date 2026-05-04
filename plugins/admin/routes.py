@@ -19,6 +19,17 @@ logger = logging.getLogger("mirror.admin")
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+# WARN-F16-005 — outbox admin endpoints accept a ?queue= param. Restrict it to
+# a known allowlist so callers cannot poke arbitrary queue names against the
+# stats/DLQ surface. Today there is exactly one queue ("inkwell-receipts");
+# adding a queue means adding it here.
+ALLOWED_OUTBOX_QUEUES = frozenset({DEFAULT_QUEUE})
+
+
+def _check_outbox_queue(queue: str) -> None:
+    if queue not in ALLOWED_OUTBOX_QUEUES:
+        raise HTTPException(status_code=422, detail="queue_not_allowed")
+
 
 def _get_admin(authorization: str = Header(default="")) -> TokenContext:
     ctx = resolve_token_context(authorization)
@@ -135,6 +146,7 @@ def outbox_status(
         "dlq_count": N,
       }
     """
+    _check_outbox_queue(queue)
     db = get_db()
     enabled = is_outbox_enabled()
     if not enabled:
@@ -174,6 +186,7 @@ def outbox_dlq(
     ctx: TokenContext = Depends(_get_admin),
 ):
     """Inspect up to *limit* DLQ rows (operator surface, S024 F-16)."""
+    _check_outbox_queue(queue)
     db = get_db()
     if not is_outbox_enabled():
         return {"queue": queue, "rows": []}
