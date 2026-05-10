@@ -19,8 +19,8 @@ from fastapi import HTTPException
 
 logger = logging.getLogger("mirror.auth")
 
-_FALLBACK_ADMIN_TOKEN = "sk-mumega-internal-001"
 _FALLBACK_TENANT_KEYS_PATH = "/home/mumega/mirror/tenant_keys.json"
+_FALLBACK_SOS_MIRROR_KEYS_PATH = "/home/mumega/.sos/mirror_keys.json"
 
 # Internal Mumega agents — their engrams go to the "mumega-internal" namespace,
 # not to a customer workspace and not to NULL (admin). This prevents internal
@@ -67,13 +67,23 @@ def _load_tenant_keys(path: str) -> dict[str, dict]:
         return {
             hashlib.sha256(item["key"].encode()).hexdigest(): item
             for item in items
-            if item.get("active")
+            if item.get("active") and item.get("source", "legacy_file") != "mirror_tokens"
         }
     except FileNotFoundError:
         return {}
     except Exception as exc:
         logger.warning("Failed to load tenant keys from %s: %s", path, exc)
         return {}
+
+
+def _load_legacy_key_paths(paths: list[str]) -> dict[str, dict]:
+    """Load legacy file-backed Mirror keys from first-class + S027 paths."""
+    keys: dict[str, dict] = {}
+    for path in paths:
+        if not path:
+            continue
+        keys.update(_load_tenant_keys(path))
+    return keys
 
 
 def resolve_token_context(
@@ -88,7 +98,8 @@ def resolve_token_context(
     1. Empty → 401
     2. Admin token → TokenContext(is_admin=True, workspace_id=None)
     3. DB-backed token (mirror_tokens table) → scoped to workspace
-    4. tenant_keys.json hit → TokenContext scoped to that tenant
+    4. legacy key-file hit (tenant_keys.json or ~/.sos/mirror_keys.json)
+       → TokenContext scoped to that tenant
     5. SOS bus token (sos.kernel.auth) → internal agents get workspace_id="mumega-internal"
     6. Unknown → 401
 
@@ -102,9 +113,14 @@ def resolve_token_context(
         tenant_keys_path: Override for testing.
     """
     if admin_token is None:
-        admin_token = os.getenv("MIRROR_ADMIN_TOKEN", _FALLBACK_ADMIN_TOKEN)
+        admin_token = os.getenv("MIRROR_ADMIN_TOKEN", "")
     if tenant_keys_path is None:
-        tenant_keys_path = os.getenv("MIRROR_TENANT_KEYS_PATH", _FALLBACK_TENANT_KEYS_PATH)
+        tenant_key_paths = [
+            os.getenv("MIRROR_TENANT_KEYS_PATH", _FALLBACK_TENANT_KEYS_PATH),
+            os.getenv("MIRROR_SOS_MIRROR_KEYS_PATH", _FALLBACK_SOS_MIRROR_KEYS_PATH),
+        ]
+    else:
+        tenant_key_paths = [tenant_keys_path]
 
     token = authorization.removeprefix("Bearer ").strip()
     if not token:
@@ -133,24 +149,22 @@ def resolve_token_context(
         if hasattr(_db, "resolve_token_from_db"):
             row = _db.resolve_token_from_db(key_hash)
             if row:
-                _is_admin = row["token_type"] == "admin"
-                _role = row.get("role") or ("coordinator" if _is_admin else None)
-                _tier_access = list(VALID_TIERS) if _is_admin else list(row.get("tier_access") or ["public", "project"])
+                _tier_access = list(row.get("tier_access") or ["public", "project"])
                 _entity_id = row.get("entity_id") or row.get("workspace_id")
                 return TokenContext(
                     workspace_id=row["workspace_id"],
                     owner_type=row["token_type"],
                     owner_id=row.get("owner_id") or row.get("label"),
-                    is_admin=_is_admin,
+                    is_admin=False,
                     tier_access=_tier_access,
                     entity_id=_entity_id,
-                    role=_role,
+                    role=row.get("role"),
                 )
     except Exception as _exc:
         logger.warning("DB token lookup failed: %s", _exc)
 
     # 3. Tenant keys (legacy — tenant_keys.json fallback)
-    keys = _load_tenant_keys(tenant_keys_path)
+    keys = _load_legacy_key_paths(tenant_key_paths)
     if key_hash in keys:
         entry = keys[key_hash]
         slug = entry["agent_slug"]

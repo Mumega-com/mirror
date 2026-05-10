@@ -33,7 +33,7 @@ def _check_outbox_queue(queue: str) -> None:
 
 def _get_admin(authorization: str = Header(default="")) -> TokenContext:
     ctx = resolve_token_context(authorization)
-    if not ctx.is_admin:
+    if not ctx.is_admin or ctx.workspace_id is not None:
         raise HTTPException(status_code=403, detail="Admin token required")
     return ctx
 
@@ -49,7 +49,7 @@ class CreateWorkspaceRequest(BaseModel):
 
 class IssueTokenRequest(BaseModel):
     label: str
-    token_type: str = "agent"   # agent | squad | readonly | admin
+    token_type: str = "agent"   # agent | squad | readonly
     owner_id: Optional[str] = None
 
 
@@ -94,7 +94,7 @@ def issue_token(
     ctx: TokenContext = Depends(_get_admin),
 ):
     """Issue a new token for a workspace. Returns plaintext token once — store it."""
-    valid_types = {"agent", "squad", "readonly", "admin"}
+    valid_types = {"agent", "squad", "readonly"}
     if request.token_type not in valid_types:
         raise HTTPException(status_code=400, detail=f"token_type must be one of: {valid_types}")
     try:
@@ -204,10 +204,12 @@ def revoke_token(
     token_id: str,
     ctx: TokenContext = Depends(_get_admin),
 ):
-    """Revoke a token (soft delete — sets active=false)."""
+    """Revoke a token in the specified workspace."""
     db = get_db()
     if not hasattr(db, "revoke_token"):
         raise HTTPException(status_code=501, detail="Token DB not available on this backend")
-    db.revoke_token(token_id)
+    revoked = db.revoke_token(token_id, workspace_id=workspace_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="Token not found in workspace")
     logger.info("Revoked token %s from workspace %s", token_id, workspace_id)
     return {"status": "revoked", "token_id": token_id}

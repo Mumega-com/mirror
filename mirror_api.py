@@ -12,7 +12,6 @@ sharing access to the collective FRC knowledge base.
 
 import os
 import sys
-import hashlib
 import json
 import logging
 import time
@@ -54,70 +53,25 @@ supabase = db if hasattr(db, "table") else None
 # Embedding: Gemini (free) with truncation to 1536 dims for pgvector compat
 
 # --- TENANT AUTH ---
-ADMIN_TOKEN = os.getenv("MIRROR_ADMIN_TOKEN", "sk-mumega-internal-001")
-TENANT_KEYS_PATH = "/home/mumega/mirror/tenant_keys.json"
-
-
-def _load_tenant_keys() -> dict:
-    """Load active per-tenant keys from disk. Returns {key_hash: agent_slug}."""
-    try:
-        with open(TENANT_KEYS_PATH) as f:
-            raw = json.load(f)
-        items = raw if isinstance(raw, list) else [raw]
-        return {
-            hashlib.sha256(item["key"].encode()).hexdigest(): item["agent_slug"]
-            for item in items if item.get("active")
-        }
-    except Exception:
-        return {}
-
-
 def resolve_token(authorization: str = Header(default="")) -> Optional[str]:
-    """Validate Bearer token.
+    """Compatibility wrapper for retired inline auth.
 
     Returns:
-        None           — admin token or internal SOS token, full unrestricted access.
-        agent_slug     — tenant_keys.json match, scoped to that agent.
-        "sos:<project>"— SOS bus token with a non-null project, scoped to that project.
+        None       — root admin token.
+        workspace  — scoped workspace token/key/bus context.
 
     Raises 401/403 on invalid or missing tokens.
 
-    Implementation: delegates SOS bus-token verification to sos.services.auth.verify_bearer
-    (single source of truth). Legacy tenant_keys.json path is preserved for backwards
-    compatibility; that lookup is Mirror-specific and not part of the SOS bus.
+    New route code should depend on kernel.auth.resolve_token_context() directly.
+    This shim remains for old imports, but delegates to the hardened cascade so
+    DB-issued tokens, legacy S027 keys, and root-admin boundaries stay identical.
     """
-    token = authorization.removeprefix("Bearer ").strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Authorization required")
+    from kernel.auth import resolve_token_context
 
-    # Admin token — full unrestricted access (no file I/O needed).
-    if token == ADMIN_TOKEN:
+    ctx = resolve_token_context(authorization)
+    if ctx.is_admin:
         return None
-
-    # Legacy tenant_keys.json path — Mirror-specific, scoped to agent_slug.
-    key_hash = hashlib.sha256(token.encode()).hexdigest()
-    keys = _load_tenant_keys()
-    if key_hash in keys:
-        return keys[key_hash]
-
-    # SOS bus tokens — delegate to canonical auth module.
-    # sys.path was configured at module load time to include /mnt/HC_Volume_104325311/SOS.
-    try:
-        from sos.services.auth import verify_bearer as _sos_verify_bearer  # type: ignore[import]
-        ctx = _sos_verify_bearer(f"Bearer {token}")
-        if ctx is not None:
-            if ctx.project:
-                # Customer-scoped token — force to their project.
-                return f"sos:{ctx.project}"
-            else:
-                # Internal agent token (is_system or admin agent) — full access.
-                return None
-    except ImportError:
-        # SOS package not available — fall back gracefully (e.g., running in
-        # an environment without /mnt/HC_Volume_104325311/SOS mounted).
-        logger.warning("sos.services.auth not importable; SOS bus token lookup skipped")
-
-    raise HTTPException(status_code=403, detail="Invalid token")
+    return ctx.workspace_id
 
 
 # FastAPI app

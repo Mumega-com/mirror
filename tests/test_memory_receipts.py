@@ -36,7 +36,15 @@ plugin_loader.mount_all(app)
 client = TestClient(app, raise_server_exceptions=False)
 
 
+def _activate_env() -> None:
+    os.environ["MIRROR_BACKEND"] = "sqlite"
+    os.environ["MIRROR_SQLITE_PATH"] = "/tmp/mirror_test_receipts.db"
+    os.environ["MIRROR_TENANT_KEYS_PATH"] = _tenant_file.name
+    os.environ["MIRROR_ADMIN_TOKEN"] = ADMIN_TOKEN
+
+
 def test_store_emits_mirror_receipt_after_write(monkeypatch) -> None:
+    _activate_env()
     calls = []
 
     def fake_emit(data, *, merged=False, actor=None, client=None):

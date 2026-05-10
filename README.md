@@ -150,13 +150,13 @@ admin token    → workspace_id = NULL     → sees all (admin only)
 Four-tier cascade in `kernel/auth.py`:
 
 1. **Admin token** — `MIRROR_ADMIN_TOKEN` env var, full access
-2. **DB-issued tokens** — `mirror_tokens` table, issued via REST API (primary path for SaaS customers)
+2. **DB-issued tokens** — `mirror_tokens` table, issued via REST API (primary path for SaaS customers; never admin)
 3. **SOS bus tokens** — verified via `sos.kernel.auth` (if SOS is on `PYTHONPATH`)
-4. **Tenant keys** — `tenant_keys.json` legacy fallback (preserved for backwards compat)
+4. **Legacy tenant keys** — `tenant_keys.json` and S027 `~/.sos/mirror_keys.json` fallback (non-admin compatibility only)
 
 ### Issuing tokens
 
-Use the admin REST API to create workspaces and issue scoped tokens:
+Use the admin REST API to create workspaces and issue scoped tokens. Admin routes require the root `MIRROR_ADMIN_TOKEN` context; DB-issued workspace tokens cannot call `/admin/*`.
 
 ```bash
 # Create a workspace
@@ -171,14 +171,20 @@ curl -X POST http://localhost:8844/admin/workspaces/<ws-id>/tokens \
   -H "Content-Type: application/json" \
   -d '{"label": "kasra-agent", "token_type": "agent", "owner_id": "kasra"}'
 
-# Revoke a token
+# Revoke a token in its workspace
 curl -X DELETE http://localhost:8844/admin/workspaces/<ws-id>/tokens/<tok-id> \
   -H "Authorization: Bearer $MIRROR_ADMIN_TOKEN"
 ```
 
 Token format: `sk-{workspace-slug}-{32 hex chars}`. Only the `sha256` hash is stored — plaintext is never persisted.
 
+Valid DB-issued `token_type` values are `agent`, `squad`, and `readonly`. Root administration stays outside `mirror_tokens`; migration `053_mirror_token_hardening.sql` enforces that invariant and inerts old DB rows with `token_type='admin'`.
+
+Revocation is workspace-scoped: `/admin/workspaces/<ws-id>/tokens/<tok-id>` only revokes the token when the token belongs to `<ws-id>`.
+
 When SOS is present, agent tokens from the bus work in Mirror automatically — no separate key issuance needed.
+
+Legacy file-backed keys are still accepted so older onboarding/provisioning flows keep working while tenants move to DB-issued tokens. These keys resolve as workspace-scoped non-admin callers; they never satisfy `/admin/*`. SOS cache rows marked `source: "mirror_tokens"` are not a Mirror auth fallback; they are plaintext delivery cache for DB-issued tokens, and SOS revalidates their token IDs before reuse when Mirror admin config is present.
 
 ---
 
@@ -214,6 +220,8 @@ Environment=PYTHONPATH=/home/youruser
 # Required
 GEMINI_API_KEY=your_gemini_key
 MIRROR_ADMIN_TOKEN=sk-your-admin-token
+MIRROR_TENANT_KEYS_PATH=/home/mumega/mirror/tenant_keys.json
+MIRROR_SOS_MIRROR_KEYS_PATH=/home/mumega/.sos/mirror_keys.json
 
 # Backend
 MIRROR_BACKEND=local            # or: supabase
@@ -257,9 +265,9 @@ REDIS_PASSWORD=your_redis_password
 |--------|------|-------------|
 | `POST` | `/admin/workspaces` | Create a workspace |
 | `GET` | `/admin/workspaces` | List all workspaces |
-| `POST` | `/admin/workspaces/{id}/tokens` | Issue a scoped token |
+| `POST` | `/admin/workspaces/{id}/tokens` | Issue a scoped non-admin token |
 | `GET` | `/admin/workspaces/{id}/tokens` | List tokens for a workspace |
-| `DELETE` | `/admin/workspaces/{id}/tokens/{tok}` | Revoke a token |
+| `DELETE` | `/admin/workspaces/{id}/tokens/{tok}` | Revoke a token in that workspace |
 
 ### System
 

@@ -738,6 +738,10 @@ class LocalDB:
         import secrets as _secrets
         import hashlib as _hashlib
 
+        valid_token_types = {"agent", "squad", "readonly"}
+        if token_type not in valid_token_types:
+            raise ValueError(f"token_type must be one of: {valid_token_types}")
+
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT slug FROM mirror_workspaces WHERE id = %s AND active = true", [workspace_id])
@@ -776,14 +780,19 @@ class LocalDB:
                 )
                 return [dict(r) for r in cur.fetchall()]
 
-    def revoke_token(self, token_id: str) -> None:
-        """Soft-delete a token by setting active = false."""
+    def revoke_token(self, token_id: str, workspace_id: str) -> bool:
+        """Soft-delete a workspace token by setting active = false."""
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE mirror_tokens SET active = false WHERE id = %s",
-                    [token_id],
+                    """
+                    UPDATE mirror_tokens
+                    SET active = false
+                    WHERE id = %s AND workspace_id = %s AND active = true
+                    """,
+                    [token_id, workspace_id],
                 )
+                return cur.rowcount > 0
 
     def resolve_token_from_db(self, token_hash: str) -> Optional[dict]:
         """Look up a token by sha256 hash. Updates last_used_at. Returns None if not found/inactive."""
@@ -795,7 +804,10 @@ class LocalDB:
                            w.slug as workspace_slug
                     FROM mirror_tokens t
                     JOIN mirror_workspaces w ON w.id = t.workspace_id
-                    WHERE t.token_hash = %s AND t.active = true AND w.active = true
+                    WHERE t.token_hash = %s
+                      AND t.active = true
+                      AND w.active = true
+                      AND t.token_type <> 'admin'
                     """,
                     [token_hash],
                 )
@@ -931,11 +943,28 @@ class SupabaseDB:
 # Factory
 # ---------------------------------------------------------------------------
 
-def get_db() -> "LocalDB | SupabaseDB | Any":
+_db_singleton: "LocalDB | SupabaseDB | Any | None" = None
+_db_singleton_signature: tuple[str, str | None, str | None] | None = None
+
+
+def _db_signature() -> tuple[str, str | None, str | None]:
     backend = os.getenv("MIRROR_BACKEND", "local")
-    if backend == "supabase":
-        return SupabaseDB()
-    elif backend == "sqlite":
-        from kernel.db_sqlite import SQLiteDB
-        return SQLiteDB()
-    return LocalDB()
+    sqlite_path = os.getenv("MIRROR_SQLITE_PATH") if backend == "sqlite" else None
+    vector_dims = os.getenv("MIRROR_VECTOR_DIMS") if backend == "sqlite" else None
+    return backend, sqlite_path, vector_dims
+
+
+def get_db() -> "LocalDB | SupabaseDB | Any":
+    global _db_singleton, _db_singleton_signature
+    signature = _db_signature()
+    if _db_singleton is None or _db_singleton_signature != signature:
+        backend = signature[0]
+        if backend == "supabase":
+            _db_singleton = SupabaseDB()
+        elif backend == "sqlite":
+            from kernel.db_sqlite import SQLiteDB
+            _db_singleton = SQLiteDB()
+        else:
+            _db_singleton = LocalDB()
+        _db_singleton_signature = signature
+    return _db_singleton

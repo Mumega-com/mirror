@@ -23,7 +23,7 @@ from urllib.parse import urlencode
 from urllib.error import URLError
 
 MIRROR_URL = os.environ.get("MIRROR_URL", "http://localhost:8844")
-MIRROR_TOKEN = os.environ.get("MIRROR_TOKEN", "sk-mumega-internal-001")
+MIRROR_TOKEN = os.environ.get("MIRROR_TOKEN") or os.environ.get("MIRROR_ADMIN_TOKEN", "")
 DEFAULT_AGENT = os.environ.get("MIRROR_AGENT", "river")
 
 
@@ -37,6 +37,8 @@ def make_response(id, result=None, error=None):
 
 
 def mirror_request(method: str, path: str, body: dict | None = None) -> dict:
+    if not MIRROR_TOKEN:
+        return {"error": "MIRROR_TOKEN is required"}
     url = f"{MIRROR_URL}{path}"
     headers = {
         "Authorization": f"Bearer {MIRROR_TOKEN}",

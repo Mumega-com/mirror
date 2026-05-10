@@ -226,18 +226,35 @@ Without this, SaaS is impossible. Customers need to create and manage their own 
 **Endpoints:**
 ```
 POST /admin/workspaces          → create workspace, returns workspace_id
-POST /admin/workspaces/{id}/tokens → issue token for workspace
+POST /admin/workspaces/{id}/tokens → issue non-admin token for workspace
 GET  /admin/workspaces/{id}/tokens → list tokens
-DELETE /admin/workspaces/{id}/tokens/{token_id} → revoke
+DELETE /admin/workspaces/{id}/tokens/{token_id} → revoke only if token belongs to workspace
 ```
 
 **Token types:**
-- `admin` — full workspace access, can issue sub-tokens
-- `agent:{name}` — scoped to agent namespace within workspace
-- `squad:{name}` — scoped to squad namespace
+- `agent` — scoped to agent namespace within workspace
+- `squad` — scoped to squad namespace
 - `readonly` — search only, no store
 
 Storage: `mirror_tokens` table in PostgreSQL (replaces flat `tenant_keys.json`).
+
+Hardening note, 2026-05-08: DB-issued tokens are never admin credentials.
+Admin routes require the root `MIRROR_ADMIN_TOKEN` context (`is_admin=True`,
+`workspace_id=None`). Migration `053_mirror_token_hardening.sql` adds the
+`agent|squad|readonly` DB constraint and inerts legacy `token_type='admin'`
+rows.
+
+Compatibility note, 2026-05-08: S027 provisioning now attempts to issue a
+DB-backed Mirror token through the root-admin `/admin/workspaces/*/tokens`
+surface and caches the one-time plaintext in `~/.sos/mirror_keys.json` for
+idempotent delivery. Rows marked `source="mirror_tokens"` are delivery cache
+only; authentication and revocation are enforced by the `mirror_tokens` DB row.
+SOS provisioning revalidates cached DB token IDs before reuse when Mirror
+root-admin config is present; revoked or missing token IDs are marked inactive
+and replaced.
+Unmarked / `source="legacy_file"` rows remain a non-admin compatibility
+fallback for older tenants. DB-issued `mirror_tokens` remain the primary
+customer-token path.
 
 ---
 

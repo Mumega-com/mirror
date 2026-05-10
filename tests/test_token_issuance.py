@@ -63,6 +63,16 @@ def test_issue_token_returns_plaintext(db, workspace):
     assert result["workspace_id"] == workspace["id"]
 
 
+def test_issue_token_rejects_admin_type(db, workspace):
+    with pytest.raises(ValueError):
+        db.issue_token(
+            workspace_id=workspace["id"],
+            label="admin-not-allowed",
+            token_type="admin",
+            owner_id="test-admin",
+        )
+
+
 def test_issued_token_hash_stored(db, workspace):
     result = db.issue_token(
         workspace_id=workspace["id"],
@@ -94,9 +104,32 @@ def test_revoke_token(db, workspace):
         owner_id="test",
     )
     token_hash = hashlib.sha256(result["token"].encode()).hexdigest()
-    db.revoke_token(result["token_id"])
+    revoked = db.revoke_token(result["token_id"], workspace_id=workspace["id"])
+    assert revoked is True
     resolved = db.resolve_token_from_db(token_hash)
     assert resolved is None  # revoked tokens are not resolved
+
+
+def test_revoke_token_is_workspace_scoped(db, workspace):
+    other = db.create_workspace(slug="test-ws-003", name="Other Workspace")
+    try:
+        result = db.issue_token(
+            workspace_id=workspace["id"],
+            label="scoped-revoke",
+            token_type="agent",
+            owner_id="test",
+        )
+        token_hash = hashlib.sha256(result["token"].encode()).hexdigest()
+
+        revoked = db.revoke_token(result["token_id"], workspace_id=other["id"])
+
+        assert revoked is False
+        assert db.resolve_token_from_db(token_hash) is not None
+    finally:
+        with db._conn() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM mirror_tokens WHERE workspace_id IN (%s, %s)", [workspace["id"], other["id"]])
+            cur.execute("DELETE FROM mirror_workspaces WHERE id = %s", [other["id"]])
 
 
 def test_resolve_token_from_db_unknown(db):
