@@ -5,12 +5,15 @@ Extracted from mirror_api.py. Uses kernel.auth.TokenContext for workspace-scoped
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
+import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from kernel.auth import TokenContext, VALID_TIERS, resolve_token_context
 from kernel.db import get_db
@@ -447,3 +450,202 @@ async def update_engram_tier(
         engram_id, new_tier, ctx.owner_id or "admin",
     )
     return {"status": "updated", "engram_id": engram_id, "tier": new_tier}
+
+
+# ---------------------------------------------------------------------------
+# S064 Track A — Hermes Experience Ledger
+# ---------------------------------------------------------------------------
+
+class _ExperienceContext(BaseModel):
+    target_industry: str
+    channel: Literal["LinkedIn", "X", "Email"]
+    hook_style: Literal["bold", "technical", "empathetic"]
+
+
+class _ExperienceOutcome(BaseModel):
+    success: bool
+    metric_value: float = Field(ge=0.0, le=1.0)
+    feedback_signal: Literal["click", "reply", "conversion", "failure"]
+
+
+class ExperienceEngramRequest(BaseModel):
+    agent_id: str
+    tenant_id: str
+    project_id: str
+    goal_ref: Optional[str] = None
+    action_type: Literal["outreach", "content", "ops"]
+    reasoning_mode: Literal["neutral", "thinking"] = "neutral"
+    context_snapshot: _ExperienceContext
+    outcome: _ExperienceOutcome
+    the_lesson: str
+    citable_proof: List[str] = []
+
+
+class ExperienceRecallRequest(BaseModel):
+    action_type: Optional[Literal["outreach", "content", "ops"]] = None
+    target_industry: Optional[str] = None
+    top_k: int = Field(default=3, ge=1, le=20)
+    query: Optional[str] = None  # optional semantic override
+
+
+def _get_redis():
+    """Lazy Redis connection for experience indexing."""
+    import redis as _redis
+    return _redis.Redis(
+        host=os.environ.get("REDIS_HOST", "localhost"),
+        port=int(os.environ.get("REDIS_PORT", 6379)),
+        password=os.environ.get("REDIS_PASSWORD"),
+        decode_responses=True,
+    )
+
+
+def _index_experience(engram_id: str, req: ExperienceEngramRequest) -> None:
+    """Maintain Redis sorted sets for fast experience recall by action_type+industry.
+
+    ZADD experience:idx:{action_type}:{target_industry} {metric_value} {engram_id}
+
+    Also emits to experience:stream so BrainService can consume when running.
+    Both writes are best-effort — failure does not abort the store path.
+    """
+    try:
+        r = _get_redis()
+        idx_key = f"experience:idx:{req.action_type}:{req.context_snapshot.target_industry}"
+        r.zadd(idx_key, {engram_id: req.outcome.metric_value})
+        # Keep top-50 per bucket
+        r.zremrangebyrank(idx_key, 0, -51)
+        r.xadd("experience:stream", {
+            "event": "experience.stored",
+            "engram_id": engram_id,
+            "action_type": req.action_type,
+            "target_industry": req.context_snapshot.target_industry,
+            "channel": req.context_snapshot.channel,
+            "metric_value": str(req.outcome.metric_value),
+            "tenant_id": req.tenant_id,
+            "project_id": req.project_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as _e:
+        logger.warning("experience index/emit failed (non-fatal): %s", _e)
+
+
+@router.post("/experience/store")
+async def store_experience_engram(
+    request: ExperienceEngramRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """Store a Hermes Experience Ledger engram (S064 Track A schema)."""
+    engram_id = str(uuid.uuid4())
+    embedding = _get_embedding_http(request.the_lesson)
+
+    data = {
+        "context_id": engram_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "series": "Hermes - Experience Ledger",
+        "project": request.project_id,
+        "workspace_id": ctx.workspace_id if not ctx.is_admin else None,
+        "owner_type": ctx.owner_type,
+        "owner_id": ctx.owner_id,
+        "epistemic_truths": [request.the_lesson],
+        "core_concepts": [
+            request.action_type,
+            request.context_snapshot.target_industry,
+            request.context_snapshot.channel,
+            request.outcome.feedback_signal,
+        ],
+        "affective_vibe": "Lucid" if request.outcome.success else "Reflective",
+        "energy_level": "Balanced",
+        "next_attractor": "",
+        "raw_data": {
+            "engram_id": engram_id,
+            "agent_id": request.agent_id,
+            "tenant_id": request.tenant_id,
+            "project_id": request.project_id,
+            "goal_ref": request.goal_ref,
+            "action_type": request.action_type,
+            "reasoning_mode": request.reasoning_mode,
+            "context_snapshot": request.context_snapshot.model_dump(),
+            "outcome": request.outcome.model_dump(),
+            "the_lesson": request.the_lesson,
+            "citable_proof": request.citable_proof,
+        },
+        "embedding": embedding,
+        "importance_score": request.outcome.metric_value,
+        "tier": "project",
+        "entity_id": ctx.workspace_id if not ctx.is_admin else None,
+        "permitted_roles": [],
+    }
+
+    db = _get_db()
+    db.upsert_engram(data)
+
+    _index_experience(engram_id, request)
+
+    logger.info(
+        "Experience engram stored: %s action=%s industry=%s metric=%.2f",
+        engram_id, request.action_type,
+        request.context_snapshot.target_industry,
+        request.outcome.metric_value,
+    )
+    return {
+        "status": "stored",
+        "engram_id": engram_id,
+        "action_type": request.action_type,
+        "target_industry": request.context_snapshot.target_industry,
+    }
+
+
+@router.post("/experience/recall")
+async def recall_experience_engrams(
+    request: ExperienceRecallRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """Recall top experience engrams filtered by action_type and target_industry.
+
+    Used by Hermes to retrieve 'what worked' before drafting outreach.
+    Call: recall(query='experience:outreach:dental') maps to
+    action_type='outreach', target_industry='dental'.
+    """
+    query_text = request.query or " ".join(filter(None, [
+        "experience lesson learned outreach engagement",
+        request.action_type,
+        request.target_industry,
+        "what worked reply conversion success",
+    ]))
+    embedding = _get_embedding_http(query_text)
+
+    db = _get_db()
+    results = db.search_engrams(
+        embedding=embedding,
+        threshold=0.25,
+        limit=request.top_k * 5,  # over-fetch for post-filter
+        workspace_id=ctx.workspace_id if not ctx.is_admin else None,
+    )
+
+    # Post-filter on action_type / target_industry from core_concepts
+    filtered = []
+    for row in results:
+        concepts = row.get("core_concepts") or []
+        if request.action_type and request.action_type not in concepts:
+            continue
+        if request.target_industry and request.target_industry not in concepts:
+            continue
+        # Confirm it's an experience engram by series
+        raw = row.get("raw_data") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        if raw.get("action_type") or "Experience Ledger" in (row.get("series") or ""):
+            filtered.append({
+                "engram_id": raw.get("engram_id") or str(row.get("id", "")),
+                "the_lesson": raw.get("the_lesson") or row.get("text", ""),
+                "action_type": raw.get("action_type", ""),
+                "context_snapshot": raw.get("context_snapshot", {}),
+                "outcome": raw.get("outcome", {}),
+                "similarity": row.get("similarity", 0.0),
+            })
+
+    # Sort by metric_value desc, take top_k
+    filtered.sort(key=lambda x: x.get("outcome", {}).get("metric_value", 0.0), reverse=True)
+    return {"engrams": filtered[: request.top_k]}
