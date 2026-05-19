@@ -1,0 +1,637 @@
+"""
+Memory plugin routes — engram store, search, and retrieval.
+
+Extracted from mirror_api.py. Uses kernel.auth.TokenContext for workspace-scoped access.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import uuid
+from datetime import datetime, timezone
+from typing import List, Literal, Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel, Field
+
+from kernel.auth import TokenContext, VALID_TIERS, resolve_token_context
+from kernel.db import get_db
+from kernel.embeddings import get_embedding as _get_embedding
+from kernel.outbox import is_outbox_enabled, make_outbox
+from kernel.receipts import build_mirror_engram_write_receipt, emit_mirror_engram_write_receipt
+from kernel.search import hybrid_search, rrf_blend
+from kernel.types import EngramResponse, EngramStoreRequest, SearchRequest
+
+logger = logging.getLogger("mirror.memory")
+
+router = APIRouter(tags=["memory"])
+
+
+def _get_db():
+    return get_db()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_embedding_http(text: str) -> List[float]:
+    try:
+        return _get_embedding(text)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _agent_to_series(agent: str) -> str:
+    mapping = {
+        "assistant": "Assistant - Conversational AI",
+        "executor": "Executor - Task Execution",
+        "researcher": "Researcher - Content Generation",
+        "frc": "Fractal Resonance Coherence — 821 Higgs Cohesion Series",
+    }
+    return mapping.get(agent.lower(), f"{agent.title()} - Agent Memory")
+
+
+def _resolve_token(authorization: str = Header(default="")) -> TokenContext:
+    return resolve_token_context(authorization)
+
+
+def _rrf_blend(
+    vector_results: list[dict],
+    bm25_results: list[dict],
+    k: int = 60,
+) -> list[dict]:
+    """Reciprocal Rank Fusion — merges two ranked lists by doc id."""
+    return rrf_blend(vector_results, bm25_results, k=k)
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@router.post("/search")
+async def search_memory(
+    request: SearchRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+    x_project_context: Optional[str] = Header(default=None),
+) -> List[EngramResponse]:
+    """Semantic search across engrams, hard-scoped by workspace_id and tier RBAC."""
+    try:
+        # Non-admin tokens are locked to their workspace
+        workspace_id = None if ctx.is_admin else ctx.workspace_id
+
+        # Tier access: admin sees all; otherwise use token-resolved tier_access.
+        # Backward-compat: tokens without tier_access field default to ['public', 'project'].
+        tier_access = None if ctx.is_admin else (ctx.tier_access or ["public", "project"])
+        caller_entity_id = None if ctx.is_admin else ctx.entity_id
+
+        logger.info(
+            "Search query: '%s' (workspace: %s, admin: %s, x_project_context: %s, tiers: %s)",
+            request.query, workspace_id, ctx.is_admin, x_project_context, tier_access,
+        )
+
+        db = _get_db()
+
+        if x_project_context and not ctx.is_admin:
+            # Blend: agent-owned engrams (scoped to this caller) + project-scoped engrams.
+            # Admin callers are excluded from this path because ctx.owner_id is None for
+            # admin tokens — passing owner_id=None would skip the owner filter and leak
+            # agent engrams across all workspaces.
+            query_embedding = _get_embedding_http(request.query)
+            internal_limit = request.top_k * 2
+            agent_rows = db.search_engrams(
+                embedding=query_embedding,
+                threshold=request.threshold,
+                limit=internal_limit,
+                workspace_id=workspace_id,
+                owner_type="agent",
+                owner_id=ctx.owner_id,
+                tier_access=tier_access,
+                caller_entity_id=caller_entity_id,
+            )
+            project_rows = db.search_engrams(
+                embedding=query_embedding,
+                threshold=request.threshold,
+                limit=internal_limit,
+                owner_type="project",
+                owner_id=x_project_context,
+                tier_access=tier_access,
+                caller_entity_id=caller_entity_id,
+            )
+            # Deduplicate by id then blend via RRF
+            seen: set[str] = set()
+            merged_rows: list[dict] = []
+            for row in agent_rows + project_rows:
+                row_id = str(row.get("id", ""))
+                if row_id not in seen:
+                    seen.add(row_id)
+                    merged_rows.append(row)
+            blended = merged_rows[:request.top_k]
+        elif x_project_context:
+            # Admin caller with X-Project-Context: filter by project only, no blend.
+            # We do NOT use owner_id here to avoid cross-tenant leaks.
+            query_embedding = _get_embedding_http(request.query)
+            blended = db.search_engrams(
+                embedding=query_embedding,
+                threshold=request.threshold,
+                limit=request.top_k,
+                workspace_id=workspace_id,
+                owner_type="project",
+                owner_id=x_project_context,
+            )
+        else:
+            blended = hybrid_search(
+                query=request.query,
+                top_k=request.top_k,
+                threshold=request.threshold,
+                workspace_id=workspace_id,
+                db=db,
+                project=request.project if ctx.is_admin else None,
+                tier_access=tier_access,
+                caller_entity_id=caller_entity_id,
+            )
+
+        results = []
+        for row in blended:
+            # Agent-slug filter (legacy SOS sos:<project> path, admin-only)
+            if ctx.is_admin and request.agent_filter:
+                agent_series = _agent_to_series(request.agent_filter)
+                if agent_series not in row.get("series", ""):
+                    continue
+
+            raw_data = row.get("raw_data") or {}
+            text = raw_data.get("text", "") if isinstance(raw_data, dict) else ""
+
+            results.append(
+                EngramResponse(
+                    id=row.get("id"),
+                    context_id=row.get("context_id"),
+                    series=row.get("series"),
+                    project=row.get("project"),
+                    similarity=row.get("similarity"),
+                    epistemic_truths=row.get("epistemic_truths", []),
+                    core_concepts=row.get("core_concepts", []),
+                    affective_vibe=row.get("affective_vibe", "Unknown"),
+                    timestamp=row.get("ts") or row.get("timestamp", ""),
+                    text=text,
+                    tier=row.get("tier", "project"),
+                    entity_id=row.get("entity_id"),
+                )
+            )
+
+            if len(results) >= request.top_k:
+                break
+
+        logger.info("Found %d matching engrams", len(results))
+        return results
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Search error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/store")
+async def store_engram(
+    request: EngramStoreRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+    x_session_id: Optional[str] = Header(default=None),
+):
+    """Store new engram, tagged with caller's workspace_id."""
+    try:
+        # Determine effective workspace and agent from token
+        if ctx.is_admin:
+            workspace_id = None
+            agent = request.agent
+            project = request.project
+        else:
+            workspace_id = ctx.workspace_id
+            agent = ctx.owner_id or request.agent
+            project = request.project
+
+        # Determine owner identity and session classification
+        is_session = ctx.owner_type == "session" or x_session_id is not None
+        effective_owner_type = "session" if is_session else ctx.owner_type
+        effective_owner_id = (x_session_id or ctx.owner_id) if is_session else ctx.owner_id
+
+        logger.info("Storing engram from %s (workspace: %s): %s", agent, workspace_id, request.context_id)
+
+        embedding = _get_embedding_http(request.text)
+
+        # Validate tier if provided
+        tier = request.tier or "project"
+        if tier not in VALID_TIERS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid tier {tier!r}. Must be one of: {sorted(VALID_TIERS)}",
+            )
+        # entity_id: use request value, fallback to workspace_id
+        entity_id = request.entity_id or workspace_id
+
+        data = {
+            "context_id": request.context_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "series": _agent_to_series(agent),
+            "project": project,
+            "workspace_id": workspace_id,
+            "owner_type": effective_owner_type,
+            "owner_id": effective_owner_id,
+            "epistemic_truths": request.epistemic_truths,
+            "core_concepts": request.core_concepts,
+            "affective_vibe": request.affective_vibe,
+            "energy_level": request.energy_level,
+            "next_attractor": request.next_attractor,
+            "raw_data": {
+                "agent": agent,
+                "text": request.text,
+                "project": project,
+                "metadata": request.metadata,
+            },
+            "embedding": embedding,
+            "tier": tier,
+            "entity_id": entity_id,
+            "permitted_roles": request.permitted_roles or [],
+        }
+
+        # Session engrams get low importance so they don't pollute standard recall
+        if is_session:
+            data["importance_score"] = 0.05
+            data["memory_tier"] = "working"
+
+        # Online dedup: if a near-identical engram already exists (cosine > 0.92)
+        # merge into it instead of creating a duplicate row.
+        db = _get_db()
+        merged = False
+        if hasattr(db, "search_engrams") and hasattr(db, "merge_engram"):
+            near = db.search_engrams(
+                embedding=embedding,
+                threshold=0.92,
+                limit=1,
+                workspace_id=workspace_id,
+            )
+            if near and near[0].get("similarity", 0) >= 0.92:
+                existing_id = near[0]["id"]
+                db.merge_engram(existing_id, request.text, request.metadata or {})
+                logger.info(
+                    "Merged duplicate into engram %s (similarity=%.3f)",
+                    existing_id, near[0]["similarity"],
+                )
+                merged = True
+
+        # F-16: when the outbox is enabled and the underlying DB supports
+        # the atomic-write extension (`upsert_engram_with_outbox`), bind
+        # the engram write and the receipt enqueue in one transaction.
+        # Otherwise fall back to the legacy fire-and-forget receipt path
+        # — same surface, same silent-fail-open behaviour as before.
+        outbox_id: Optional[int] = None
+        receipt = None
+        if not merged:
+            if is_outbox_enabled() and hasattr(db, "upsert_engram_with_outbox"):
+                payload = build_mirror_engram_write_receipt(data, merged=False, actor=agent)
+                # require_durable=True: refuse a process-local MemoryOutbox
+                # for the atomic-txn helper (BLOCK-P1-7).
+                outbox = make_outbox(db, require_durable=True)
+                outbox_id = db.upsert_engram_with_outbox(data, payload, outbox)
+            else:
+                db.upsert_engram(data)
+                receipt = emit_mirror_engram_write_receipt(data, merged=False, actor=agent)
+        else:
+            # Merge path doesn't write a new engram row, so the outbox
+            # binding has nothing to atomically pair with — keep the
+            # legacy emit. This is acceptable because merges don't
+            # produce new audit objects, only ref-count bumps.
+            receipt = emit_mirror_engram_write_receipt(data, merged=True, actor=agent)
+
+        logger.info(
+            "Stored engram: %s (merged=%s outbox_id=%s)",
+            request.context_id, merged, outbox_id,
+        )
+        return {
+            "status": "success",
+            "context_id": request.context_id,
+            "agent": agent,
+            "workspace_id": workspace_id,
+            "merged": merged,
+            "receipt": receipt.get("receipt") if isinstance(receipt, dict) else None,
+            "outbox_id": outbox_id,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Store error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/recent/{agent}")
+async def get_recent_engrams(
+    agent: str,
+    limit: int = 10,
+    project: Optional[str] = None,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """Get recent engrams, scoped to caller's workspace."""
+    try:
+        workspace_id = None if ctx.is_admin else ctx.workspace_id
+        effective_agent = agent if ctx.is_admin else (ctx.owner_id or agent)
+
+        engrams = _get_db().recent_engrams(
+            effective_agent,
+            limit=limit,
+            project=project if ctx.is_admin else None,
+            workspace_id=workspace_id,
+        )
+        return {
+            "agent": effective_agent,
+            "workspace_id": workspace_id,
+            "count": len(engrams),
+            "engrams": engrams,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Recent engrams error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/stats")
+async def get_stats(ctx: TokenContext = Depends(_resolve_token)):
+    """Get memory statistics (admin: global; tenant: workspace-scoped count)."""
+    try:
+        db = _get_db()
+        if ctx.is_admin:
+            return {
+                "total_engrams": db.count_engrams(),
+                "by_agent": {
+                    "assistant": db.count_engrams("Assistant"),
+                    "executor": db.count_engrams("Executor"),
+                    "researcher": db.count_engrams("Researcher"),
+                    "frc_corpus": db.count_engrams("FRC"),
+                },
+            }
+        else:
+            # Non-admin callers get a count scoped to their own workspace only.
+            # count_engrams_in_workspace ensures internal-agents is never counted
+            # for customer tokens (and customers never count each other's engrams).
+            count = (
+                db.count_engrams_in_workspace(ctx.workspace_id)
+                if hasattr(db, "count_engrams_in_workspace")
+                else db.count_engrams()
+            )
+            return {
+                "workspace_id": ctx.workspace_id,
+                "total_engrams": count,
+            }
+    except Exception as e:
+        logger.error("Stats error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tier promotion endpoint — coordinator role required
+# ---------------------------------------------------------------------------
+
+class TierUpdateRequest(BaseModel):
+    tier: str
+
+
+@router.patch("/engrams/{engram_id}/tier")
+async def update_engram_tier(
+    engram_id: str,
+    request: TierUpdateRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """Promote or demote an engram's tier. Requires coordinator role.
+
+    Only callers with role='coordinator' (or is_admin=True) may change tiers.
+    The new tier must be one of: public, squad, project, entity, private.
+    """
+    # Authorization: coordinator role or admin required
+    if not ctx.is_admin and ctx.role != "coordinator":
+        raise HTTPException(
+            status_code=403,
+            detail="Tier updates require coordinator role",
+        )
+
+    new_tier = request.tier
+    if new_tier not in VALID_TIERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid tier {new_tier!r}. Must be one of: {sorted(VALID_TIERS)}",
+        )
+
+    db = _get_db()
+    if not hasattr(db, "update_engram_tier"):
+        raise HTTPException(status_code=501, detail="update_engram_tier not supported by this backend")
+
+    updated = db.update_engram_tier(engram_id, new_tier)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Engram {engram_id!r} not found")
+
+    logger.info(
+        "Tier updated: engram=%s new_tier=%s by %s",
+        engram_id, new_tier, ctx.owner_id or "admin",
+    )
+    return {"status": "updated", "engram_id": engram_id, "tier": new_tier}
+
+
+# ---------------------------------------------------------------------------
+# S064 Track A — Hermes Experience Ledger
+# ---------------------------------------------------------------------------
+
+class _ExperienceContext(BaseModel):
+    target_industry: str
+    channel: Literal["LinkedIn", "X", "Email"]
+    hook_style: Literal["bold", "technical", "empathetic"]
+
+
+class _ExperienceOutcome(BaseModel):
+    success: bool
+    metric_value: float = Field(ge=0.0, le=1.0)
+    feedback_signal: Literal["click", "reply", "conversion", "failure"]
+
+
+class ExperienceEngramRequest(BaseModel):
+    agent_id: str
+    tenant_id: str
+    project_id: str
+    goal_ref: Optional[str] = None
+    action_type: Literal["outreach", "content", "ops"]
+    reasoning_mode: Literal["neutral", "thinking"] = "neutral"
+    context_snapshot: _ExperienceContext
+    outcome: _ExperienceOutcome
+    the_lesson: str
+    citable_proof: List[str] = []
+
+
+class ExperienceRecallRequest(BaseModel):
+    action_type: Optional[Literal["outreach", "content", "ops"]] = None
+    target_industry: Optional[str] = None
+    top_k: int = Field(default=3, ge=1, le=20)
+    query: Optional[str] = None  # optional semantic override
+
+
+def _get_redis():
+    """Lazy Redis connection for experience indexing."""
+    import redis as _redis
+    return _redis.Redis(
+        host=os.environ.get("REDIS_HOST", "localhost"),
+        port=int(os.environ.get("REDIS_PORT", 6379)),
+        password=os.environ.get("REDIS_PASSWORD"),
+        decode_responses=True,
+    )
+
+
+def _index_experience(engram_id: str, req: ExperienceEngramRequest) -> None:
+    """Maintain Redis sorted sets for fast experience recall by action_type+industry.
+
+    ZADD experience:idx:{action_type}:{target_industry} {metric_value} {engram_id}
+
+    Also emits to experience:stream so BrainService can consume when running.
+    Both writes are best-effort — failure does not abort the store path.
+    """
+    try:
+        r = _get_redis()
+        idx_key = f"experience:idx:{req.action_type}:{req.context_snapshot.target_industry}"
+        r.zadd(idx_key, {engram_id: req.outcome.metric_value})
+        # Keep top-50 per bucket
+        r.zremrangebyrank(idx_key, 0, -51)
+        r.xadd("experience:stream", {
+            "event": "experience.stored",
+            "engram_id": engram_id,
+            "action_type": req.action_type,
+            "target_industry": req.context_snapshot.target_industry,
+            "channel": req.context_snapshot.channel,
+            "metric_value": str(req.outcome.metric_value),
+            "tenant_id": req.tenant_id,
+            "project_id": req.project_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as _e:
+        logger.warning("experience index/emit failed (non-fatal): %s", _e)
+
+
+@router.post("/experience/store")
+async def store_experience_engram(
+    request: ExperienceEngramRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """Store a Hermes Experience Ledger engram (S064 Track A schema)."""
+    engram_id = str(uuid.uuid4())
+    embedding = _get_embedding_http(request.the_lesson)
+
+    data = {
+        "context_id": engram_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "series": "Hermes - Experience Ledger",
+        "project": request.project_id,
+        "workspace_id": ctx.workspace_id if not ctx.is_admin else None,
+        "owner_type": ctx.owner_type,
+        "owner_id": ctx.owner_id,
+        "epistemic_truths": [request.the_lesson],
+        "core_concepts": [
+            request.action_type,
+            request.context_snapshot.target_industry,
+            request.context_snapshot.channel,
+            request.outcome.feedback_signal,
+        ],
+        "affective_vibe": "Lucid" if request.outcome.success else "Reflective",
+        "energy_level": "Balanced",
+        "next_attractor": "",
+        "raw_data": {
+            "engram_id": engram_id,
+            "agent_id": request.agent_id,
+            "tenant_id": request.tenant_id,
+            "project_id": request.project_id,
+            "goal_ref": request.goal_ref,
+            "action_type": request.action_type,
+            "reasoning_mode": request.reasoning_mode,
+            "context_snapshot": request.context_snapshot.model_dump(),
+            "outcome": request.outcome.model_dump(),
+            "the_lesson": request.the_lesson,
+            "citable_proof": request.citable_proof,
+        },
+        "embedding": embedding,
+        "importance_score": request.outcome.metric_value,
+        "tier": "project",
+        "entity_id": ctx.workspace_id if not ctx.is_admin else None,
+        "permitted_roles": [],
+    }
+
+    db = _get_db()
+    db.upsert_engram(data)
+
+    _index_experience(engram_id, request)
+
+    logger.info(
+        "Experience engram stored: %s action=%s industry=%s metric=%.2f",
+        engram_id, request.action_type,
+        request.context_snapshot.target_industry,
+        request.outcome.metric_value,
+    )
+    return {
+        "status": "stored",
+        "engram_id": engram_id,
+        "action_type": request.action_type,
+        "target_industry": request.context_snapshot.target_industry,
+    }
+
+
+@router.post("/experience/recall")
+async def recall_experience_engrams(
+    request: ExperienceRecallRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """Recall top experience engrams filtered by action_type and target_industry.
+
+    Used by Hermes to retrieve 'what worked' before drafting outreach.
+    Call: recall(query='experience:outreach:dental') maps to
+    action_type='outreach', target_industry='dental'.
+    """
+    query_text = request.query or " ".join(filter(None, [
+        "experience lesson learned outreach engagement",
+        request.action_type,
+        request.target_industry,
+        "what worked reply conversion success",
+    ]))
+    embedding = _get_embedding_http(query_text)
+
+    db = _get_db()
+    results = db.search_engrams(
+        embedding=embedding,
+        threshold=0.25,
+        limit=request.top_k * 5,  # over-fetch for post-filter
+        workspace_id=ctx.workspace_id if not ctx.is_admin else None,
+    )
+
+    # Post-filter on action_type / target_industry from core_concepts
+    filtered = []
+    for row in results:
+        concepts = row.get("core_concepts") or []
+        if request.action_type and request.action_type not in concepts:
+            continue
+        if request.target_industry and request.target_industry not in concepts:
+            continue
+        # Confirm it's an experience engram by series
+        raw = row.get("raw_data") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        if raw.get("action_type") or "Experience Ledger" in (row.get("series") or ""):
+            filtered.append({
+                "engram_id": raw.get("engram_id") or str(row.get("id", "")),
+                "the_lesson": raw.get("the_lesson") or row.get("text", ""),
+                "action_type": raw.get("action_type", ""),
+                "context_snapshot": raw.get("context_snapshot", {}),
+                "outcome": raw.get("outcome", {}),
+                "similarity": row.get("similarity", 0.0),
+            })
+
+    # Sort by metric_value desc, take top_k
+    filtered.sort(key=lambda x: x.get("outcome", {}).get("metric_value", 0.0), reverse=True)
+    return {"engrams": filtered[: request.top_k]}

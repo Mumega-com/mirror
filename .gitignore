@@ -1,0 +1,20 @@
+venv/
+__pycache__/
+*.pyc
+.env
+data/
+agents/*/
+tenant_keys.json
+.DS_Store
+engrams/
+*.json
+!mirror_engram.json
+gateway-worker/node_modules/
+# Added by code-review-graph
+.code-review-graph/
+mirror_code_sync.py.bak
+/tmp/
+.worktrees/
+backups/
+*.bak
+*.bak-*
