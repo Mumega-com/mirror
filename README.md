@@ -127,6 +127,15 @@ bus-subscriber mode and provide an adapter module with
 
 The OSS repository does not ship SOS-specific code.
 
+## Tests
+
+Run the standalone test suite:
+
+```bash
+pip install -r requirements.txt pytest
+pytest
+```
+
 ## Safety
 
 Never commit:

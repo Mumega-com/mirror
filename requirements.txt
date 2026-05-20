@@ -7,3 +7,5 @@ numpy
 openai
 fastembed
 redis
+sqlite-vec
+pytest-asyncio
