@@ -3,48 +3,38 @@ import json
 import uuid
 import argparse
 import datetime
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import List, Dict
 from dotenv import load_dotenv
+
+sys.path.insert(0, str(Path(__file__).parent))
+from kernel.embeddings import TARGET_EMBEDDING_MODEL, get_embedding
 
 # Load credentials from the master .env
 load_dotenv("/home/mumega/.env.secrets")
 
 # Note: You will need to install these:
-# pip install supabase openai-python
+# pip install supabase
 try:
     from supabase import create_client, Client
-    from openai import OpenAI
 except ImportError:
-    print("Warning: supabase or openai-python not installed. Script will run in simulation mode.")
+    print("Warning: supabase not installed. Script will run in simulation mode.")
     create_client = None
-    OpenAI = None
 
 # --- CONFIGURATION ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_API_KEY")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-
 class MirrorSync:
     def __init__(self):
         self.supabase: Client = None
-        self.openai: OpenAI = None
         
         if create_client and SUPABASE_URL:
             self.supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        
-        if OpenAI and OPENAI_API_KEY:
-            self.openai = OpenAI(api_key=OPENAI_API_KEY)
 
     def get_embedding(self, text: str) -> List[float]:
-        if not self.openai:
-            return [0.0] * 1536
-            
-        response = self.openai.embeddings.create(
-            input=text,
-            model="text-embedding-3-small"
-        )
-        return response.data[0].embedding
+        return get_embedding(text)
 
     def sync_engram(self, file_path: str):
         with open(file_path, 'r') as f:
@@ -69,7 +59,8 @@ class MirrorSync:
             "energy_level": engram.get('affective_state', {}).get('energy_levels', 'Stable'),
             "next_attractor": engram.get('next_attractor', 'Further Research'),
             "raw_data": engram,
-            "embedding": embedding
+            "embedding": embedding,
+            "embedding_model": TARGET_EMBEDDING_MODEL,
         }
         
         if self.supabase:
@@ -83,8 +74,8 @@ class MirrorSync:
             print(f"SIMULATION MODE: Prepared data for {engram['context_id']} using table 'mirror_engrams'")
 
     def search_engrams(self, query: str, limit: int = 3):
-        if not self.supabase or not self.openai:
-            print("Search requires Supabase and OpenAI credentials.")
+        if not self.supabase:
+            print("Search requires Supabase credentials.")
             return
             
         print(f"Searching for Cognitive State: '{query}'...")

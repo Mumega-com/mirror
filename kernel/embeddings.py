@@ -1,10 +1,11 @@
 """
 Embedding cascade for Mirror:
-  0. SOS kernel EmbeddingAdapter  (vertex → gemini → local, switchable via EMBEDDING_BACKEND)
-  1. gemini-embedding-2-preview   (best — MRL native 1536, multimodal)
-  2. gemini-embedding-001          (fallback — proven, free)
-  3. local ONNX via fastembed      (offline/Pi — semantic, 384 dims, ~90 MB model)
-  4. local numpy hash              (last resort — deterministic, zero deps, always works)
+  1. google:text-embedding-004     (Vertex AI, canonical Mirror model)
+  2. SOS kernel EmbeddingAdapter   (vertex → gemini → local, switchable)
+  3. gemini-embedding-2-preview    (fallback — MRL native 1536, multimodal)
+  4. gemini-embedding-001          (fallback — proven, free)
+  5. local ONNX via fastembed      (offline/Pi — semantic, 384 dims, ~90 MB model)
+  6. local numpy hash              (last resort — deterministic, zero deps, always works)
 """
 
 import hashlib
@@ -35,9 +36,41 @@ except ImportError as _e:
     logger.warning("SOS kernel EmbeddingAdapter not importable (%s); falling back to Mirror cascade", _e)
 
 _DIMS = 1536
+TARGET_EMBEDDING_MODEL = "google:text-embedding-004"
+_vertex_model = None
 
 
-# ── Tier 1: Gemini Embedding 2 ───────────────────────────────────────────────
+# ── Tier 1: Vertex AI text-embedding-004 ─────────────────────────────────────
+
+def _embed_vertex_text_embedding_004(text: str) -> list[float]:
+    """
+    Vertex AI text-embedding-004 via Application Default Credentials.
+    Google returns 768 dimensions; Mirror zero-pads to 1536 for existing
+    pgvector/sqlite-vec index compatibility.
+    """
+    global _vertex_model
+    import vertexai
+    from vertexai.language_models import TextEmbeddingModel
+
+    if _vertex_model is None:
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT", "mumega-com")
+        location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+        vertexai.init(project=project, location=location)
+        _vertex_model = TextEmbeddingModel.from_pretrained("text-embedding-004")
+        logger.info(
+            "Vertex AI text-embedding-004 client initialised (project=%s, location=%s)",
+            project,
+            location,
+        )
+
+    embeddings = _vertex_model.get_embeddings([text[:8192]])
+    emb: list[float] = list(embeddings[0].values)
+    if len(emb) < _DIMS:
+        emb = emb + [0.0] * (_DIMS - len(emb))
+    return emb[:_DIMS]
+
+
+# ── Tier 3: Gemini Embedding 2 ───────────────────────────────────────────────
 
 def _embed_gemini2(text: str) -> list[float]:
     from google import genai
@@ -51,7 +84,7 @@ def _embed_gemini2(text: str) -> list[float]:
     return list(result.embeddings[0].values)
 
 
-# ── Tier 2: Gemini Embedding 1 ───────────────────────────────────────────────
+# ── Tier 4: Gemini Embedding 1 ───────────────────────────────────────────────
 
 def _embed_gemini1(text: str) -> list[float]:
     from google import genai
@@ -64,7 +97,7 @@ def _embed_gemini1(text: str) -> list[float]:
     return emb[:_DIMS]
 
 
-# ── Tier 3: Local ONNX via fastembed (offline / Raspberry Pi) ────────────────
+# ── Tier 5: Local ONNX via fastembed (offline / Raspberry Pi) ────────────────
 
 _local_onnx_model = None  # lazy-loaded on first use
 
@@ -92,7 +125,7 @@ def _embed_local_onnx(text: str) -> list[float]:
     return emb[:_DIMS]
 
 
-# ── Tier 4: Local numpy hash (always works, deterministic) ────────────────────
+# ── Tier 6: Local numpy hash (always works, deterministic) ────────────────────
 
 def _embed_local(text: str) -> list[float]:
     """
@@ -121,25 +154,61 @@ def _embed_local(text: str) -> list[float]:
 def get_embedding(text: str) -> list[float]:
     """
     Cascade:
-      Tier 0 — SOS kernel EmbeddingAdapter (vertex → gemini → local, env-switchable)
-      Tier 1 — gemini-embedding-2-preview
-      Tier 2 — gemini-embedding-001
-      Tier 3 — local ONNX via fastembed (offline / Pi)
-      Tier 4 — local numpy hash (deterministic, always works)
+      Tier 1 — google:text-embedding-004 via Vertex AI ADC
+      Tier 2 — SOS kernel EmbeddingAdapter (vertex → gemini → local, env-switchable)
+      Tier 3 — gemini-embedding-2-preview
+      Tier 4 — gemini-embedding-001
+      Tier 5 — local ONNX via fastembed (offline / Pi)
+      Tier 6 — local numpy hash (deterministic, always works)
 
-    Tiers 1-2 require GEMINI_API_KEY and network access.
-    Tier 3 (fastembed) runs fully offline — ideal for Raspberry Pi.
-    Tier 4 is deterministic but not semantic; used only as last resort.
+    Tier 1 requires Google ADC and network access.
+    Tiers 3-4 require GEMINI_API_KEY and network access.
+    Tier 5 (fastembed) runs fully offline — ideal for Raspberry Pi.
+    Tier 6 is deterministic but not semantic; used only as last resort.
     """
-    # ── Tier 0: SOS kernel EmbeddingAdapter ──────────────────────────────────
+    backend = os.environ.get("MIRROR_EMBEDDING_BACKEND", "auto").lower().strip()
+
+    if backend in {"google", "vertex", "text-embedding-004", TARGET_EMBEDDING_MODEL}:
+        return _embed_vertex_text_embedding_004(text)
+
+    if backend == "local":
+        return _embed_local_onnx(text)
+
+    if backend == "hash":
+        return _embed_local(text)
+
+    if backend == "gemini":
+        return _embed_gemini2(text)
+
+    if backend == "gemini1":
+        return _embed_gemini1(text)
+
+    if backend == "sos":
+        if not _KERNEL_AVAILABLE or kernel_embed is None:
+            raise RuntimeError("MIRROR_EMBEDDING_BACKEND=sos but SOS kernel adapter is not available")
+        return kernel_embed(text)
+
+    if backend != "auto":
+        raise RuntimeError(
+            "Unknown MIRROR_EMBEDDING_BACKEND="
+            f"{backend!r}; expected auto, google, sos, gemini, gemini1, local, or hash"
+        )
+
+    # ── Tier 1: canonical Mirror backend ────────────────────────────────────
+    try:
+        return _embed_vertex_text_embedding_004(text)
+    except Exception as exc:
+        logger.warning("%s failed: %s — falling back to Mirror cascade", TARGET_EMBEDDING_MODEL, exc)
+
+    # ── Tier 2: SOS kernel EmbeddingAdapter ─────────────────────────────────
     if _KERNEL_AVAILABLE and kernel_embed is not None:
         try:
             emb = kernel_embed(text)
             return emb
         except Exception as exc:
-            logger.warning("Tier 0 (SOS kernel adapter) failed: %s — falling back to Mirror cascade", exc)
+            logger.warning("Tier 2 (SOS kernel adapter) failed: %s — falling back to Mirror cascade", exc)
 
-    # ── Tiers 1-4: Mirror-local cascade ──────────────────────────────────────
+    # ── Tiers 3-6: Mirror-local fallback cascade ────────────────────────────
     for tier, fn in [
         ("gemini-embedding-2-preview", _embed_gemini2),
         ("gemini-embedding-001",       _embed_gemini1),

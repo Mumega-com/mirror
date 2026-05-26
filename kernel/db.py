@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from typing import Any, Optional, List, Dict, Union
 from dataclasses import dataclass, field
 
+from kernel.embeddings import TARGET_EMBEDDING_MODEL
+
 logger = logging.getLogger("mirror.db")
 
 # ---------------------------------------------------------------------------
@@ -354,7 +356,7 @@ class LocalDB:
     # --- legacy/optimized methods ---
 
     def upsert_engram(self, data: dict) -> None:
-        data.setdefault("embedding_model", "gemini-embedding-2-preview")
+        data.setdefault("embedding_model", TARGET_EMBEDDING_MODEL)
         self.table("mirror_engrams").upsert(data, on_conflict="context_id").execute()
 
     def upsert_engram_with_outbox(
@@ -374,7 +376,7 @@ class LocalDB:
         `enqueue(conn, payload)` accepts an external psycopg2
         connection (i.e. `NativeSqlOutbox`).
         """
-        data.setdefault("embedding_model", "gemini-embedding-2-preview")
+        data.setdefault("embedding_model", TARGET_EMBEDDING_MODEL)
 
         # Build the same INSERT/ON CONFLICT shape as _execute_upsert,
         # but inline so we control the transaction boundary.
@@ -895,7 +897,7 @@ class SupabaseDB:
         return self._sb.rpc(fn, params)
 
     def upsert_engram(self, data: dict) -> None:
-        data.setdefault("embedding_model", "gemini-embedding-2-preview")
+        data.setdefault("embedding_model", TARGET_EMBEDDING_MODEL)
         self._sb.table("mirror_engrams").upsert(data, on_conflict="context_id").execute()
 
     def search_engrams(self, embedding, threshold, limit, project=None):

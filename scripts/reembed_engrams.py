@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Re-embed mirror_engrams with gemini-embedding-2-preview.
+Re-embed mirror_engrams with google:text-embedding-004.
 
-Targets only rows where embedding_model IS NULL or != 'gemini-embedding-2-preview'.
+Targets only rows where embedding_model IS NULL or != 'google:text-embedding-004'.
 Safe to re-run — already-migrated rows are skipped automatically.
 
 Usage:
@@ -38,7 +38,7 @@ if _env_file.exists():
 
 # Add mirror root to path so we can import kernel
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from kernel.embeddings import get_embedding
+from kernel.embeddings import TARGET_EMBEDDING_MODEL, get_embedding
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("reembed")
 
-TARGET_MODEL = "gemini-embedding-2-preview"
+TARGET_MODEL = TARGET_EMBEDDING_MODEL
 BATCH_SIZE = 20          # rows per batch
 SLEEP_BETWEEN_BATCHES = 1.0  # seconds — keeps us well under 1500 req/min
 LOG_EVERY = 500          # rows
@@ -115,7 +115,7 @@ def update_engram(conn, engram_id: str, embedding: list[float], dry_run: bool) -
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Re-embed mirror_engrams with gemini-embedding-2-preview")
+    parser = argparse.ArgumentParser(description=f"Re-embed mirror_engrams with {TARGET_MODEL}")
     parser.add_argument("--dry-run", action="store_true", help="Preview only — no writes")
     parser.add_argument("--backup", action="store_true", help="Dump CSV backup before running")
     parser.add_argument("--limit", type=int, default=None, help="Process only N rows")
