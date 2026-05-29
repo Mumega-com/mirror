@@ -1,0 +1,38 @@
+[project]
+name = "mumega-mirror"
+version = "2.0.0"
+description = "Shared semantic memory for AI agent teams — hybrid vector + full-text recall with workspace isolation."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Mumega Labs", email = "hadi@mumega.com" }]
+keywords = ["memory", "embeddings", "agents", "vector-search", "pgvector", "mcp"]
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "psycopg2-binary",
+    "python-dotenv",
+    "google-genai",
+    "pydantic",
+]
+
+[project.urls]
+Homepage = "https://mumega.com"
+Repository = "https://github.com/Mumega-com/mirror"
+
+[project.scripts]
+mirror-api = "_cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Flat layout: the HTTP service and console entry are top-level modules,
+# the kernel ships as a subpackage. Keep this list explicit so the build does
+# not vacuum up scripts, plugins, or operational modules that are not meant to
+# install as importable packages.
+py-modules = ["mirror_api", "_cli"]
+
+[tool.setuptools.packages.find]
+include = ["kernel", "kernel.*"]

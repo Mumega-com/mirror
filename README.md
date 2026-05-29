@@ -94,6 +94,20 @@ python mirror_api.py
 # Live at http://localhost:8844
 ```
 
+### Install as a package
+
+Mirror ships a `pyproject.toml`, so a tenant can install it (and its
+dependencies) cleanly instead of `pip install`-ing each dep by hand:
+
+```bash
+pip install -e .        # editable install from a checkout
+mirror-api              # console entry — same as `python mirror_api.py`
+```
+
+This installs `fastapi`, `uvicorn`, `psycopg2-binary`, `python-dotenv`,
+`google-genai`, and `pydantic`, and exposes the `mirror-api` command. You still
+need PostgreSQL + pgvector and a configured `.env` (see Quick Start above).
+
 **Store a memory:**
 ```bash
 curl -X POST http://localhost:8844/store \
@@ -335,6 +349,36 @@ systemctl --user enable --now mirror
 ## Storage
 
 Mirror uses `halfvec(1536)` (16-bit floats) for embeddings and an HNSW index (`halfvec_cosine_ops`). This halves storage vs `vector(1536)` with negligible recall loss. Requires pgvector ≥ 0.7.0.
+
+---
+
+## Updating
+
+Mirror tracks a canonical `upstream` remote. To pull the latest release:
+
+```bash
+# One-time: register upstream (if not already present)
+git remote add upstream https://github.com/Mumega-com/mirror.git
+
+# Pull updates + see what changed
+scripts/mirror-update.sh
+```
+
+`scripts/mirror-update.sh` fetches `upstream`, reports how many commits you are
+behind, fast-forwards `main` (refusing if your branch has diverged), and then
+**lists** the SQL migrations for you to review. It does **not** run `psql`
+automatically — apply migrations deliberately:
+
+```bash
+python scripts/migrate.py --target mirror --status   # show pending
+python scripts/migrate.py --target mirror            # apply
+```
+
+Then restart the service to pick up code changes:
+
+```bash
+systemctl --user restart mirror
+```
 
 ---
 
