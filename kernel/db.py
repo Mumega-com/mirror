@@ -1,10 +1,12 @@
 """
 Mirror DB — backend abstraction layer.
 
-MIRROR_BACKEND=local   (default) → PostgreSQL via psycopg2
-MIRROR_BACKEND=supabase          → Supabase client (for forks/hosted deployments)
+MIRROR_BACKEND=local      (default) → PostgreSQL via psycopg2
+MIRROR_BACKEND=supabase             → Supabase client (for forks/hosted deployments)
+MIRROR_BACKEND=sqlite               → SQLite + sqlite-vec (kernel/db_sqlite.py)
+MIRROR_BACKEND=cloudflare           → Cloudflare D1 + Vectorize (kernel/db_cloudflare.py)
 
-Both backends expose the same interface so mirror_api.py is backend-agnostic.
+All backends expose the same interface so mirror_api.py is backend-agnostic.
 """
 from __future__ import annotations
 
@@ -966,6 +968,9 @@ def get_db() -> "LocalDB | SupabaseDB | Any":
         elif backend == "sqlite":
             from kernel.db_sqlite import SQLiteDB
             _db_singleton = SQLiteDB()
+        elif backend == "cloudflare":
+            from kernel.db_cloudflare import CloudflareDB
+            _db_singleton = CloudflareDB()
         else:
             _db_singleton = LocalDB()
         _db_singleton_signature = signature
