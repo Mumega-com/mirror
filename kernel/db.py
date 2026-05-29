@@ -451,6 +451,16 @@ class LocalDB:
         tier_access: Optional[List[str]] = None,
         caller_entity_id: Optional[str] = None,
     ) -> list[dict]:
+        # FAIL CLOSED (Athena gate 2026-05-29, P1) — both direct-SQL paths below
+        # apply `workspace_id` only conditionally; a None workspace would carry no
+        # workspace predicate → cross-workspace rows. _memory_scope never yields
+        # None on the MCP path, so this only guards direct-Python callers; warn
+        # (don't silent-return) so any legitimate caller surfaces in logs.
+        if workspace_id is None:
+            logger.warning(
+                "search_engrams called with workspace_id=None — returning empty (fail-closed)"
+            )
+            return []
         if owner_type is not None or owner_id is not None:
             # mirror_match_engrams_v2 doesn't return owner_type/owner_id columns so we
             # can't post-filter on them. Query the engrams table directly with cosine

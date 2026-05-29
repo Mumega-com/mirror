@@ -317,8 +317,12 @@ class SQLiteDB:
         # the vec0 MATCH unfiltered AND the WHERE clause without a workspace
         # predicate (the metadata filters below are all conditional), returning
         # cross-workspace results. No workspace context = no results. Matches the
-        # guard in the cloudflare backend.
+        # guard in the cloudflare backend. Warn (don't silent-return) so any
+        # legitimate direct-Python caller surfaces in logs (Athena ruling).
         if workspace_id is None:
+            logger.warning(
+                "search_engrams called with workspace_id=None — returning empty (fail-closed)"
+            )
             return []
 
         emb_bytes = _pack(embedding)
