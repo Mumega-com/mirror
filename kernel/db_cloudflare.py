@@ -366,6 +366,12 @@ class CloudflareDB:
         workspace_id is pushed into the Vectorize ANN filter (tenant isolation,
         load-bearing) AND re-asserted in the D1 WHERE clause (defence in depth).
         """
+        # P1-A (Athena gate 2026-05-29) — FAIL CLOSED. A null workspace_id would
+        # otherwise run the Vectorize ANN with no filter (and an unscoped D1
+        # hydration) → cross-workspace reads. No workspace context = no results.
+        if workspace_id is None:
+            return []
+
         oversample = limit * 4
 
         # Push the cheap, high-cardinality equality filters into Vectorize so
