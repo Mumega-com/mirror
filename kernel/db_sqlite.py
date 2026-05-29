@@ -313,6 +313,14 @@ class SQLiteDB:
         vectors, so: similarity = 1 - distance.
         We oversample (limit * 4) to allow post-filter by metadata fields.
         """
+        # FAIL CLOSED (Athena gate 2026-05-29) — a null workspace_id would leave
+        # the vec0 MATCH unfiltered AND the WHERE clause without a workspace
+        # predicate (the metadata filters below are all conditional), returning
+        # cross-workspace results. No workspace context = no results. Matches the
+        # guard in the cloudflare backend.
+        if workspace_id is None:
+            return []
+
         emb_bytes = _pack(embedding)
 
         with self._conn() as conn:
