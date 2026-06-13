@@ -773,6 +773,15 @@ async def recall_experience_engrams(
             except Exception:
                 raw = {}
         if raw.get("action_type") or "Experience Ledger" in (row.get("series") or ""):
+            # FIREWALL: carry memory_tier + synthesized + source_engram_ids so a
+            # synthesized engram surfaced via experience-recall is ALWAYS flagged
+            # synthesized=True — type-distinguish is complete-by-construction (D12).
+            source_ids_raw = row.get("source_engram_ids") or []
+            if isinstance(source_ids_raw, str):
+                try:
+                    source_ids_raw = json.loads(source_ids_raw)
+                except Exception:
+                    source_ids_raw = []
             filtered.append({
                 "engram_id": raw.get("engram_id") or str(row.get("id", "")),
                 "the_lesson": raw.get("the_lesson") or row.get("text", ""),
@@ -780,6 +789,9 @@ async def recall_experience_engrams(
                 "context_snapshot": raw.get("context_snapshot", {}),
                 "outcome": raw.get("outcome", {}),
                 "similarity": row.get("similarity", 0.0),
+                "memory_tier": row.get("memory_tier"),
+                "synthesized": bool(row.get("synthesized", False)),
+                "source_engram_ids": source_ids_raw,
             })
 
     # Sort by metric_value desc, take top_k

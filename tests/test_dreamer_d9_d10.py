@@ -709,3 +709,204 @@ class TestFirewall:
             assert "memory_tier" in r, (
                 f"memory_tier dropped from search result for {r.get('context_id')}"
             )
+
+
+# ===========================================================================
+# D12 Tests — /experience/recall firewall symmetry
+# ===========================================================================
+
+class TestExperienceRecallFirewall:
+    """D12: /experience/recall must carry memory_tier + synthesized + source_engram_ids.
+
+    The psychosis-firewall is complete-by-construction — a synthesized engram
+    surfaced via experience-recall is ALWAYS flagged synthesized=True, never
+    readable as a witnessed experience.
+
+    Strategy: bypass the no-embedding guard in the test by directly inserting
+    an engram that carries the experience-ledger shape (action_type in raw_data,
+    synthesized=1, memory_tier='consolidated', source_engram_ids populated) and
+    a real embedding so the post-filter admits it. Then call the route handler
+    with patched DB and embedding function and assert the returned shape.
+    """
+
+    def test_experience_recall_synthesized_engram_carries_firewall_fields(self):
+        """Synthesized engram surfaced via /experience/recall carries synthesized=True,
+        memory_tier='consolidated', source_engram_ids populated."""
+        import asyncio
+        from unittest.mock import patch
+
+        ws = "ws-d12-synth"
+        src_a = "d12-src-a"
+        src_b = "d12-src-b"
+
+        # Insert two source episodic engrams via upsert (includes embedding for search)
+        _store(src_a, workspace_id=ws, series="Experience Ledger",
+               text="outreach lesson source A",
+               core_concepts=["outreach", "dental"])
+        _store(src_b, workspace_id=ws, series="Experience Ledger",
+               text="outreach lesson source B",
+               core_concepts=["outreach", "dental"])
+
+        # Read their DB IDs
+        ids = []
+        with _db._conn() as conn:
+            for cid in (src_a, src_b):
+                row = conn.execute(
+                    "SELECT id FROM mirror_engrams WHERE context_id = ?", (cid,)
+                ).fetchone()
+                assert row, f"Source engram {cid} not found"
+                ids.append(str(row[0]))
+
+        # Upsert a synthesized experience engram via the proper API (handles embedding
+        # in the separate vec0 table — bypass the no-embedding guard in synthesis).
+        synth_raw = {
+            "engram_id": "d12-synth-exp",
+            "the_lesson": "Always personalise dental outreach",
+            "action_type": "outreach",
+            "context_snapshot": {"industry": "dental"},
+            "outcome": {"metric_value": 0.9, "reply_rate": 0.4},
+        }
+        _db.upsert_engram({
+            "context_id":       "d12-synth-exp",
+            "series":           "Experience Ledger",
+            "workspace_id":     ws,
+            "owner_type":       "agent",
+            "owner_id":         "test-agent",
+            "raw_data":         synth_raw,
+            "embedding":        _VEC,           # real embedding so search admits it
+            "importance_score": 0.9,
+            "memory_tier":      "consolidated",
+            "tier":             "project",
+            "entity_id":        ws,
+            "core_concepts":    ["outreach", "dental"],
+        })
+        # Patch synthesized + source_engram_ids (upsert_engram doesn't handle these yet)
+        with _db._conn() as conn:
+            conn.execute(
+                "UPDATE mirror_engrams SET synthesized = 1, source_engram_ids = ? "
+                "WHERE context_id = ?",
+                (json.dumps(ids), "d12-synth-exp"),
+            )
+
+        # Import route-level objects after env is set
+        from plugins.memory.routes import (
+            recall_experience_engrams,
+            ExperienceRecallRequest,
+        )
+        from kernel.auth import TokenContext
+
+        ctx = TokenContext(
+            workspace_id=ws,
+            owner_type="agent",
+            owner_id="test-agent",
+            is_admin=False,
+        )
+        req = ExperienceRecallRequest(
+            action_type="outreach",
+            target_industry="dental",
+            top_k=10,
+        )
+
+        # Patch _get_db to return our shared test DB; patch _get_embedding_http
+        # to return the same vector (cosine = 1.0 with all stored rows).
+        with patch("plugins.memory.routes._get_db", return_value=_db), \
+             patch("plugins.memory.routes._get_embedding_http", return_value=_VEC):
+            result = asyncio.get_event_loop().run_until_complete(
+                recall_experience_engrams(req, ctx)
+            )
+
+        engrams = result.get("engrams", [])
+        synth_rows = [e for e in engrams if e.get("engram_id") == "d12-synth-exp"]
+        assert synth_rows, (
+            "Synthesized experience engram must appear in /experience/recall results"
+        )
+        s = synth_rows[0]
+        assert s.get("synthesized") is True, (
+            f"synthesized must be True for consolidated engram, got {s.get('synthesized')!r}"
+        )
+        assert s.get("memory_tier") == "consolidated", (
+            f"memory_tier must be 'consolidated', got {s.get('memory_tier')!r}"
+        )
+        assert isinstance(s.get("source_engram_ids"), list), (
+            f"source_engram_ids must be a list, got {type(s.get('source_engram_ids'))}"
+        )
+        assert len(s["source_engram_ids"]) >= 2, (
+            f"source_engram_ids must be populated with source IDs, got {s['source_engram_ids']!r}"
+        )
+
+    def test_experience_recall_episodic_engram_carries_synthesized_false(self):
+        """Episodic (witnessed) experience engram surfaced via /experience/recall
+        carries synthesized=False + empty source_engram_ids."""
+        import asyncio
+        from unittest.mock import patch
+
+        ws = "ws-d12-epis"
+
+        # Insert a plain episodic experience engram via upsert (includes embedding)
+        _db.upsert_engram({
+            "context_id":       "d12-epis-exp",
+            "series":           "Experience Ledger",
+            "workspace_id":     ws,
+            "owner_type":       "agent",
+            "owner_id":         "test-agent",
+            "raw_data": {
+                "engram_id": "d12-epis-exp",
+                "the_lesson": "Early follow-up wins dental deals",
+                "action_type": "outreach",
+                "context_snapshot": {"industry": "dental"},
+                "outcome": {"metric_value": 0.7, "reply_rate": 0.3},
+            },
+            "embedding":        _VEC,
+            "importance_score": 0.7,
+            "memory_tier":      "episodic",
+            "tier":             "project",
+            "entity_id":        ws,
+            "core_concepts":    ["outreach", "dental"],
+        })
+        # synthesized=0, source_engram_ids=[] are the column defaults — explicit for clarity
+        with _db._conn() as conn:
+            conn.execute(
+                "UPDATE mirror_engrams SET synthesized = 0, source_engram_ids = '[]' "
+                "WHERE context_id = ?",
+                ("d12-epis-exp",),
+            )
+
+        from plugins.memory.routes import (
+            recall_experience_engrams,
+            ExperienceRecallRequest,
+        )
+        from kernel.auth import TokenContext
+
+        ctx = TokenContext(
+            workspace_id=ws,
+            owner_type="agent",
+            owner_id="test-agent",
+            is_admin=False,
+        )
+        req = ExperienceRecallRequest(
+            action_type="outreach",
+            target_industry="dental",
+            top_k=10,
+        )
+
+        with patch("plugins.memory.routes._get_db", return_value=_db), \
+             patch("plugins.memory.routes._get_embedding_http", return_value=_VEC):
+            result = asyncio.get_event_loop().run_until_complete(
+                recall_experience_engrams(req, ctx)
+            )
+
+        engrams = result.get("engrams", [])
+        epis_rows = [e for e in engrams if e.get("engram_id") == "d12-epis-exp"]
+        assert epis_rows, (
+            "Episodic experience engram must appear in /experience/recall results"
+        )
+        e = epis_rows[0]
+        assert e.get("synthesized") is False, (
+            f"synthesized must be False for episodic engram, got {e.get('synthesized')!r}"
+        )
+        assert e.get("source_engram_ids") == [], (
+            f"source_engram_ids must be empty for episodic engram, got {e.get('source_engram_ids')!r}"
+        )
+        assert e.get("memory_tier") == "episodic", (
+            f"memory_tier must be 'episodic', got {e.get('memory_tier')!r}"
+        )
