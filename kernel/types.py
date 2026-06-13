@@ -44,11 +44,17 @@ class EngramResponse(BaseModel):
     similarity: Optional[float] = None
     epistemic_truths: List[str]
     core_concepts: List[str]
-    affective_vibe: str
+    affective_vibe: Optional[str] = None
     timestamp: Union[datetime, str]
     text: str = ""
     tier: str = "project"
     entity_id: Optional[str] = None
+    # Firewall: always present so callers can distinguish synthesized from experienced engrams.
+    # synthesized=True means this engram was produced by the Dreamer rule-based synthesis
+    # (D10). Experienced engrams have synthesized=False.
+    memory_tier: Optional[str] = None
+    synthesized: bool = False
+    source_engram_ids: List[str] = []
 
 
 class TokenContext(BaseModel):

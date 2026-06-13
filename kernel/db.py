@@ -32,6 +32,8 @@ _ALLOWED_COLUMNS = frozenset({
     "memory_tier", "importance_score", "reference_count", "archived",
     # tier access model (migration 016)
     "tier", "entity_id", "permitted_roles",
+    # Dreamer synthesis columns (D9 + D10)
+    "consolidated_at", "synthesized", "source_engram_ids", "consolidated_into",
     # mirror_code_nodes extras
     "node_id", "repo", "repo_path", "kind", "name", "qualified_name",
     "file_path", "line_start", "line_end", "language", "signature",
@@ -787,6 +789,68 @@ class LocalDB:
             with conn.cursor(cursor_factory=self._extras.RealDictCursor) as cur:
                 cur.execute(sql, [days_back, min_importance, min_reference_count])
                 return [dict(r) for r in cur.fetchall()]
+
+    # ------------------------------------------------------------------
+    # D9 — /consolidate: promote high-value, archive old low-value
+    # NOTE: This method is PostgreSQL-only. The SQLiteDB backend
+    # implements it natively. SupabaseDB returns 501.
+    # Migration required: ADD COLUMN consolidated_at TIMESTAMPTZ,
+    #   synthesized BOOLEAN DEFAULT FALSE, source_engram_ids TEXT[],
+    #   consolidated_into TEXT, reference_count INT DEFAULT 0,
+    #   archived BOOLEAN DEFAULT FALSE.
+    # ------------------------------------------------------------------
+
+    def consolidate_engrams(
+        self,
+        days_back: int = 7,
+        min_importance: float = 0.5,
+        min_reference_count: int = 3,
+        archive_days: int = 80,
+    ) -> dict:
+        """D9: promote recent high-value engrams; archive old low-value ones.
+
+        PROMOTE: recent (within days_back), importance>=min_importance OR
+          reference_count>=min_reference_count → memory_tier='consolidated' +
+          consolidated_at=NOW(). Idempotent: consolidated_at IS NULL guard.
+
+        ARCHIVE: older than archive_days, not already archived → archived=True.
+          Flag only — row kept, reversible, NO hard-delete.
+
+        Fail-safe: per-engram errors collected, not fatal.
+        Returns {promoted, archived, errors}.
+        """
+        raise NotImplementedError(
+            "consolidate_engrams is not implemented for LocalDB (PostgreSQL). "
+            "Use SQLiteDB for tests. PG migration requires: ALTER TABLE mirror_engrams "
+            "ADD COLUMN IF NOT EXISTS consolidated_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS synthesized BOOLEAN DEFAULT FALSE, "
+            "ADD COLUMN IF NOT EXISTS source_engram_ids TEXT[] DEFAULT '{}', "
+            "ADD COLUMN IF NOT EXISTS consolidated_into TEXT, "
+            "ADD COLUMN IF NOT EXISTS reference_count INT DEFAULT 0, "
+            "ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE; "
+            "ALTER TABLE mirror_engrams ADD CONSTRAINT consolidated_has_sources "
+            "CHECK (memory_tier != 'consolidated' OR array_length(source_engram_ids, 1) > 0);"
+        )
+
+    # ------------------------------------------------------------------
+    # D10 — synthesize: traceable rule-based synthesis
+    # NOTE: same PG/LocalDB stub as D9 — SQLiteDB holds the implementation.
+    # ------------------------------------------------------------------
+
+    def synthesize_engrams(
+        self,
+        min_cluster_size: int = 2,
+        workspace_id: Optional[str] = None,
+    ) -> dict:
+        """D10: cluster dreamable engrams by (series, workspace_id) and produce
+        one consolidated engram per cluster via rule-based merge.
+
+        Returns {clusters_processed, synthesized, errors}.
+        """
+        raise NotImplementedError(
+            "synthesize_engrams is not implemented for LocalDB (PostgreSQL). "
+            "Use SQLiteDB for tests."
+        )
 
     def update_engram_tier(self, engram_id: str, new_tier: str) -> Optional[dict]:
         """Update the tier of an engram. Returns the updated row or None if not found."""

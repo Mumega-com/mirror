@@ -163,6 +163,16 @@ async def search_memory(
             raw_data = row.get("raw_data") or {}
             text = raw_data.get("text", "") if isinstance(raw_data, dict) else ""
 
+            # FIREWALL: every read path must carry memory_tier, synthesized,
+            # source_engram_ids so synthesized engrams are ALWAYS distinguishable
+            # from experienced ones at the reader.
+            source_ids_raw = row.get("source_engram_ids") or []
+            if isinstance(source_ids_raw, str):
+                try:
+                    source_ids_raw = json.loads(source_ids_raw)
+                except Exception:
+                    source_ids_raw = []
+
             results.append(
                 EngramResponse(
                     id=row.get("id"),
@@ -172,11 +182,14 @@ async def search_memory(
                     similarity=row.get("similarity"),
                     epistemic_truths=row.get("epistemic_truths", []),
                     core_concepts=row.get("core_concepts", []),
-                    affective_vibe=row.get("affective_vibe", "Unknown"),
+                    affective_vibe=row.get("affective_vibe"),  # None is valid — no fabrication
                     timestamp=row.get("ts") or row.get("timestamp", ""),
                     text=text,
                     tier=row.get("tier", "project"),
                     entity_id=row.get("entity_id"),
+                    memory_tier=row.get("memory_tier"),
+                    synthesized=bool(row.get("synthesized", False)),
+                    source_engram_ids=source_ids_raw,
                 )
             )
 
@@ -337,12 +350,28 @@ async def get_recent_engrams(
         workspace_id = None if ctx.is_admin else ctx.workspace_id
         effective_agent = agent if ctx.is_admin else (ctx.owner_id or agent)
 
-        engrams = _get_db().recent_engrams(
+        raw_engrams = _get_db().recent_engrams(
             effective_agent,
             limit=limit,
             project=project if ctx.is_admin else None,
             workspace_id=workspace_id,
         )
+        # FIREWALL: ensure memory_tier + synthesized + source_engram_ids are present
+        # on every engram returned from this path.
+        engrams = []
+        for eng in raw_engrams:
+            source_ids_raw = eng.get("source_engram_ids") or []
+            if isinstance(source_ids_raw, str):
+                try:
+                    source_ids_raw = json.loads(source_ids_raw)
+                except Exception:
+                    source_ids_raw = []
+            engrams.append({
+                **eng,
+                "memory_tier": eng.get("memory_tier"),
+                "synthesized": bool(eng.get("synthesized", False)),
+                "source_engram_ids": source_ids_raw,
+            })
         return {
             "agent": effective_agent,
             "workspace_id": workspace_id,
@@ -436,6 +465,127 @@ async def update_engram_tier(
         engram_id, new_tier, ctx.owner_id or "admin",
     )
     return {"status": "updated", "engram_id": engram_id, "tier": new_tier}
+
+
+# ---------------------------------------------------------------------------
+# D9 — /consolidate  (Dreamer: promote high-value, archive old low-value)
+# ---------------------------------------------------------------------------
+
+class ConsolidateRequest(BaseModel):
+    days_back: int = 7
+    min_importance: float = 0.5
+    min_reference_count: int = 3
+    archive_days: int = 80
+
+
+@router.post("/consolidate")
+async def consolidate_memory(
+    request: ConsolidateRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """D9 Dreamer: promote recent high-value engrams to memory_tier='consolidated';
+    archive old low-value engrams (flag only — reversible, no hard-delete).
+
+    Idempotent: re-running is a no-op for already-processed engrams.
+    Fail-safe: per-engram errors collected and returned, not fatal.
+    Admin or coordinator role required.
+    """
+    if not ctx.is_admin and ctx.role != "coordinator":
+        raise HTTPException(
+            status_code=403,
+            detail="consolidate requires admin or coordinator role",
+        )
+
+    db = _get_db()
+    if not hasattr(db, "consolidate_engrams"):
+        raise HTTPException(status_code=501, detail="consolidate_engrams not supported by this backend")
+
+    try:
+        result = db.consolidate_engrams(
+            days_back=request.days_back,
+            min_importance=request.min_importance,
+            min_reference_count=request.min_reference_count,
+            archive_days=request.archive_days,
+        )
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+
+    logger.info(
+        "Consolidate: promoted=%d archived=%d errors=%d by %s",
+        len(result.get("promoted", [])),
+        len(result.get("archived", [])),
+        len(result.get("errors", [])),
+        ctx.owner_id or "admin",
+    )
+    return {
+        "status": "ok",
+        "promoted": len(result.get("promoted", [])),
+        "archived": len(result.get("archived", [])),
+        "errors": result.get("errors", []),
+    }
+
+
+# ---------------------------------------------------------------------------
+# D10 — /synthesize  (Dreamer: traceable rule-based synthesis)
+# ---------------------------------------------------------------------------
+
+class SynthesizeRequest(BaseModel):
+    min_cluster_size: int = 2
+    workspace_id: Optional[str] = None
+
+
+@router.post("/synthesize")
+async def synthesize_memory(
+    request: SynthesizeRequest,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """D10 Dreamer: cluster dreamable engrams by (series, workspace_id) and
+    produce one consolidated engram per cluster via deterministic rule-based merge.
+
+    No LLM. Affect/energy are None if no source carries them — never fabricated.
+    source_engram_ids is always complete (provenance guard — ValueError if empty).
+    ATOMIC: insert consolidated + mark sources in single transaction.
+    Idempotent. Fail-safe.
+    Admin or coordinator role required.
+    """
+    if not ctx.is_admin and ctx.role != "coordinator":
+        raise HTTPException(
+            status_code=403,
+            detail="synthesize requires admin or coordinator role",
+        )
+
+    # Non-admin callers are scoped to their own workspace
+    effective_workspace = (
+        request.workspace_id
+        if ctx.is_admin
+        else ctx.workspace_id
+    )
+
+    db = _get_db()
+    if not hasattr(db, "synthesize_engrams"):
+        raise HTTPException(status_code=501, detail="synthesize_engrams not supported by this backend")
+
+    try:
+        result = db.synthesize_engrams(
+            min_cluster_size=request.min_cluster_size,
+            workspace_id=effective_workspace,
+        )
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
+
+    logger.info(
+        "Synthesize: clusters=%d synthesized=%d errors=%d by %s",
+        result.get("clusters_processed", 0),
+        result.get("synthesized", 0),
+        len(result.get("errors", [])),
+        ctx.owner_id or "admin",
+    )
+    return {
+        "status": "ok",
+        "clusters_processed": result.get("clusters_processed", 0),
+        "synthesized": result.get("synthesized", 0),
+        "errors": result.get("errors", []),
+    }
 
 
 # ---------------------------------------------------------------------------

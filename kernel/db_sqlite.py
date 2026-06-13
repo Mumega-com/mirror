@@ -180,6 +180,20 @@ class SQLiteDB:
                 )
             """)
 
+            # Dreamer synthesis columns (D9 + D10) — migrate existing DBs
+            for col, definition in [
+                ("reference_count",   "INTEGER DEFAULT 0"),
+                ("archived",          "INTEGER DEFAULT 0"),  # SQLite has no BOOLEAN — 0/1
+                ("consolidated_at",   "TEXT"),               # ISO datetime string or NULL
+                ("synthesized",       "INTEGER DEFAULT 0"),  # 0=experienced, 1=synthesized
+                ("source_engram_ids", "TEXT DEFAULT '[]'"),  # JSON array of source ids
+                ("consolidated_into", "TEXT"),               # id of the consolidated engram
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE mirror_engrams ADD COLUMN {col} {definition}")
+                except Exception:
+                    pass  # column already exists
+
             # Indexes
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_series ON mirror_engrams(series)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_project ON mirror_engrams(project)")
@@ -187,6 +201,8 @@ class SQLiteDB:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_owner ON mirror_engrams(workspace_id, owner_type, owner_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_tier ON mirror_engrams(tier)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_entity_id ON mirror_engrams(entity_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_memory_tier ON mirror_engrams(memory_tier)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_eng_consolidated_into ON mirror_engrams(consolidated_into)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_code_repo ON mirror_code_nodes(repo)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_code_kind ON mirror_code_nodes(kind)")
 
@@ -225,7 +241,11 @@ class SQLiteDB:
         d["core_concepts"] = json.loads(d.get("core_concepts") or "[]")
         d["raw_data"] = json.loads(d.get("raw_data") or "{}")
         d["permitted_roles"] = json.loads(d.get("permitted_roles") or "[]")
+        d["source_engram_ids"] = json.loads(d.get("source_engram_ids") or "[]")
         d.setdefault("tier", "project")
+        # Normalize SQLite INTEGER booleans → Python bool
+        d["synthesized"] = bool(d.get("synthesized", 0))
+        d["archived"] = bool(d.get("archived", 0))
         return d
 
     # ── Engrams ───────────────────────────────────────────────────────────────
@@ -618,6 +638,333 @@ class SQLiteDB:
                 }
                 for r in rows
             ]
+
+    # ── Dreamer D9 + D10 ────────────────────────────────────────────────────
+
+    def fetch_dreamable_engrams(
+        self,
+        days_back: int = 7,
+        min_importance: float = 0.3,
+        min_reference_count: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Fetch engrams eligible for Dreamer processing.
+
+        Returns engrams that are:
+        - Not archived
+        - Not system tier
+        - Not already consolidated (consolidated_into IS NULL and memory_tier != 'consolidated')
+        - Meet the importance/reference threshold OR are old archive candidates.
+
+        NULL timestamps are treated as eligible (just stored, timestamp not yet set).
+        """
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT *
+                FROM mirror_engrams
+                WHERE (archived IS NULL OR archived = 0)
+                  AND (memory_tier IS NULL OR memory_tier != 'system')
+                  AND (memory_tier IS NULL OR memory_tier != 'consolidated')
+                  AND (consolidated_into IS NULL OR consolidated_into = '')
+                  AND (
+                      -- Recent high-value (NULL timestamp = just stored = eligible)
+                      (
+                          (timestamp IS NULL OR timestamp >= datetime('now', ?))
+                          AND (importance_score >= ? OR (reference_count IS NOT NULL AND reference_count >= ?))
+                      )
+                      -- Old archive candidates
+                      OR (timestamp IS NOT NULL AND timestamp < datetime('now', ?))
+                  )
+                ORDER BY timestamp DESC
+            """, (
+                f"-{days_back} days", min_importance, min_reference_count,
+                f"-80 days",
+            )).fetchall()
+            return [self._row_to_engram(r) for r in rows]
+
+    def consolidate_engrams(
+        self,
+        days_back: int = 7,
+        min_importance: float = 0.5,
+        min_reference_count: int = 3,
+        archive_days: int = 80,
+    ) -> dict[str, Any]:
+        """D9: promote recent high-value → memory_tier='consolidated';
+        archive old low-value → archived=True (flag only, row kept, reversible).
+
+        PROMOTE guard: consolidated_at IS NULL (idempotent).
+        ARCHIVE guard: archived=0 (idempotent).
+        Fail-safe: per-engram errors collected, not fatal.
+        NO hard-delete under any path.
+        """
+        now_iso = __import__("datetime").datetime.utcnow().isoformat()
+        promoted: list[str] = []
+        archived: list[str] = []
+        errors: list[dict] = []
+
+        with self._conn() as conn:
+            # Fetch candidates in one pass
+            rows = conn.execute("""
+                SELECT id, context_id, timestamp, memory_tier,
+                       importance_score, reference_count, archived, consolidated_at
+                FROM mirror_engrams
+                WHERE (memory_tier IS NULL OR memory_tier != 'system')
+            """).fetchall()
+
+            for row in rows:
+                rid = row["id"]
+                ctx = row["context_id"]
+                try:
+                    ts_str = row["timestamp"] or ""
+                    archived_flag = bool(row["archived"])
+                    cons_at = row["consolidated_at"]
+                    importance = float(row["importance_score"] or 0)
+                    ref_count = int(row["reference_count"] or 0)
+
+                    # Parse timestamp (SQLite stores as ISO string)
+                    from datetime import datetime, timezone, timedelta
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        ts_naive = ts.replace(tzinfo=None)
+                    except Exception:
+                        ts_naive = None
+
+                    now_naive = datetime.utcnow()
+                    cutoff_recent = now_naive - timedelta(days=days_back)
+                    cutoff_archive = now_naive - timedelta(days=archive_days)
+
+                    # PROMOTE: recent high-value, not yet consolidated
+                    if (
+                        ts_naive is not None
+                        and ts_naive >= cutoff_recent
+                        and (importance >= min_importance or ref_count >= min_reference_count)
+                        and not cons_at  # idempotent guard
+                    ):
+                        conn.execute(
+                            """UPDATE mirror_engrams
+                               SET memory_tier = 'consolidated', consolidated_at = ?
+                               WHERE id = ?""",
+                            (now_iso, rid),
+                        )
+                        promoted.append(ctx)
+
+                    # ARCHIVE: old, low-value, not yet archived, not already promoted here
+                    elif (
+                        ts_naive is not None
+                        and ts_naive < cutoff_archive
+                        and not archived_flag
+                        and not cons_at  # don't archive if we just promoted
+                    ):
+                        conn.execute(
+                            "UPDATE mirror_engrams SET archived = 1 WHERE id = ?",
+                            (rid,),
+                        )
+                        archived.append(ctx)
+
+                except Exception as exc:
+                    errors.append({"context_id": ctx, "error": str(exc)})
+
+        return {"promoted": promoted, "archived": archived, "errors": errors}
+
+    def synthesize_engrams(
+        self,
+        min_cluster_size: int = 2,
+        workspace_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """D10: cluster dreamable engrams by (series, workspace_id), produce one
+        consolidated engram per cluster via rule-based merge.
+
+        Clustering: deterministic grouping by (series, workspace_id).
+        Exclude: archived, system, already-consolidated (memory_tier='consolidated'
+          or consolidated_into set).
+        Per-cluster consolidated engram:
+          - epistemic_truths = dedup union of source values (order preserved, strings verbatim)
+          - core_concepts    = dedup union of source values
+          - text_digest      = source raw_data texts joined by ' ||| '
+          - affective_vibe   = majority-vote across sources; None if no source carries one
+          - energy_level     = majority-vote; None if no source carries one
+          - next_attractor   = first non-empty source value or None
+          - source_engram_ids = COMPLETE list of source IDs (ValueError if empty)
+          - memory_tier = 'consolidated', synthesized=1
+        Sources: consolidated_into = new engram id (demote-not-delete, reversible).
+        ATOMIC: insert consolidated + mark sources in single transaction.
+        Idempotent: re-run no-op (check cluster already has consolidated engram).
+        Fail-safe: per-cluster errors collected.
+        """
+        import secrets as _secrets
+        from collections import Counter
+
+        synthesized_count = 0
+        clusters_processed = 0
+        errors: list[dict] = []
+
+        # Fetch ALL non-archived, non-system, non-consolidated engrams as D10 candidates.
+        # D10 clustering is based on series+workspace grouping, not importance thresholds.
+        # We fetch with very permissive thresholds and a far days_back to get everything.
+        candidates = self.fetch_dreamable_engrams(
+            days_back=365 * 100,  # effectively all time
+            min_importance=0.0,
+            min_reference_count=0,
+        )
+
+        # Group by (series, workspace_id)
+        cluster_map: dict[tuple, list[dict]] = {}
+        for eng in candidates:
+            key = (eng.get("series") or "", eng.get("workspace_id") or "")
+            cluster_map.setdefault(key, []).append(eng)
+
+        for (series, ws_id), members in cluster_map.items():
+            # Apply workspace filter if requested
+            if workspace_id is not None and ws_id != workspace_id:
+                continue
+            # Minimum cluster size
+            if len(members) < min_cluster_size:
+                continue
+
+            clusters_processed += 1
+            source_ids = [m["id"] for m in members]
+
+            # Idempotent: check if this cluster already has a consolidated engram
+            # by verifying no existing engram has consolidated_into pointing to these sources.
+            # Simpler: check if any source already has consolidated_into set.
+            already_done = any(m.get("consolidated_into") for m in members)
+            if already_done:
+                continue
+
+            try:
+                # Provenance guard: source_engram_ids must be non-empty
+                if not source_ids:
+                    raise ValueError(
+                        "source_engram_ids is empty — cannot create consolidated engram "
+                        "without provenance. This would be fabrication."
+                    )
+
+                # Rule-based merge — NO LLM
+                # 1. epistemic_truths: dedup union, preserve order, verbatim strings from sources
+                seen_et: set[str] = set()
+                merged_epistemic: list[str] = []
+                for m in members:
+                    for val in (m.get("epistemic_truths") or []):
+                        if val not in seen_et:
+                            seen_et.add(val)
+                            merged_epistemic.append(val)
+
+                # 2. core_concepts: dedup union, preserve order, verbatim
+                seen_cc: set[str] = set()
+                merged_core: list[str] = []
+                for m in members:
+                    for val in (m.get("core_concepts") or []):
+                        if val not in seen_cc:
+                            seen_cc.add(val)
+                            merged_core.append(val)
+
+                # 3. text_digest: verbatim source texts joined by ' ||| '
+                source_texts: list[str] = []
+                for m in members:
+                    raw = m.get("raw_data") or {}
+                    text = raw.get("text", "") if isinstance(raw, dict) else ""
+                    if text:
+                        source_texts.append(text)
+                text_digest = " ||| ".join(source_texts)
+
+                # 4. affective_vibe: majority-vote across sources; None if no source carries one.
+                # NEVER default to a fabricated label like 'Neutral'/'Balanced'.
+                vibes = [m.get("affective_vibe") for m in members
+                         if m.get("affective_vibe") is not None]
+                if vibes:
+                    vibe_counts = Counter(vibes)
+                    merged_vibe: Optional[str] = vibe_counts.most_common(1)[0][0]
+                else:
+                    merged_vibe = None
+
+                # 5. energy_level: majority-vote; None if no source carries one.
+                energies = [m.get("energy_level") for m in members
+                            if m.get("energy_level") is not None]
+                if energies:
+                    energy_counts = Counter(energies)
+                    merged_energy: Optional[str] = energy_counts.most_common(1)[0][0]
+                else:
+                    merged_energy = None
+
+                # 6. next_attractor: first non-empty source value or None.
+                merged_next: Optional[str] = None
+                for m in members:
+                    val = m.get("next_attractor")
+                    if val:
+                        merged_next = val
+                        break
+
+                # Build consolidated engram row
+                new_id = _secrets.token_hex(16)
+                new_context_id = f"consolidated:{series}:{ws_id}:{new_id[:8]}"
+                now_iso = __import__("datetime").datetime.utcnow().isoformat()
+
+                # Use first source's project/workspace/tier as the consolidated engram's scope
+                first = members[0]
+                new_row = {
+                    "id": new_id,
+                    "context_id": new_context_id,
+                    "timestamp": now_iso,
+                    "series": series,
+                    "project": first.get("project"),
+                    "workspace_id": ws_id or None,
+                    "owner_type": first.get("owner_type", "agent"),
+                    "owner_id": first.get("owner_id"),
+                    "importance_score": max(
+                        (float(m.get("importance_score") or 0) for m in members),
+                        default=1.0,
+                    ),
+                    "memory_tier": "consolidated",
+                    "tier": first.get("tier", "project"),
+                    "entity_id": first.get("entity_id"),
+                    "permitted_roles": json.dumps([]),
+                    "epistemic_truths": json.dumps(merged_epistemic),
+                    "core_concepts": json.dumps(merged_core),
+                    "affective_vibe": merged_vibe,       # None is fine — stored as NULL
+                    "energy_level": merged_energy,        # None is fine — stored as NULL
+                    "next_attractor": merged_next or "",
+                    "raw_data": json.dumps({
+                        "text": text_digest,
+                        "synthesized": True,
+                        "source_count": len(members),
+                    }),
+                    "synthesized": 1,
+                    "source_engram_ids": json.dumps(source_ids),
+                    "consolidated_at": now_iso,
+                    "consolidated_into": None,
+                    "archived": 0,
+                    "reference_count": len(members),
+                }
+
+                # ATOMIC: insert consolidated + mark all sources in one transaction.
+                with self._conn() as conn:
+                    # Insert consolidated engram
+                    cols = ", ".join(new_row.keys())
+                    placeholders = ", ".join("?" * len(new_row))
+                    conn.execute(
+                        f"INSERT INTO mirror_engrams ({cols}) VALUES ({placeholders})",
+                        list(new_row.values()),
+                    )
+
+                    # Mark all sources as consolidated_into=new_id (demote-not-delete)
+                    if not source_ids:
+                        # Provenance guard: should never happen here but be explicit
+                        raise ValueError("source_engram_ids became empty before atomic mark — aborting")
+                    ph = ",".join("?" * len(source_ids))
+                    conn.execute(
+                        f"UPDATE mirror_engrams SET consolidated_into = ? WHERE id IN ({ph})",
+                        [new_id] + source_ids,
+                    )
+
+                synthesized_count += 1
+
+            except Exception as exc:
+                errors.append({"series": series, "workspace_id": ws_id, "error": str(exc)})
+
+        return {
+            "clusters_processed": clusters_processed,
+            "synthesized": synthesized_count,
+            "errors": errors,
+        }
 
     def get_stats(self) -> dict[str, int]:
         """Engram counts grouped by series (used by health endpoint)."""
