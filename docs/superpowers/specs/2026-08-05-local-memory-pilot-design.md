@@ -70,9 +70,9 @@ The database contains a dedicated receipt table with these persistent fields:
 
 - receipt identifier and queue name
 - event kind and serialized payload
-- state: `pending`, `delivered`, or `dead_letter`
+- state: `pending`, `in_flight`, or `dlq`
 - attempt count and next-attempt timestamp
-- created, updated, and delivered timestamps
+- created, updated, and visibility timestamps
 - last error text
 
 Required behavior:
@@ -81,9 +81,9 @@ Required behavior:
    in one SQLite transaction.
 2. Restarting the process preserves pending and dead-letter receipts.
 3. Claiming work is atomic and does not return the same receipt concurrently.
-4. Delivery success marks the receipt delivered; retryable failure increments
-   attempts and schedules the next attempt; exhausted failure moves it to the
-   dead-letter state.
+4. Delivery success removes the confirmed receipt, matching the established
+   `OutboxBackend` contract. Retryable failure increments attempts and schedules
+   the next attempt; exhausted failure moves it to `dlq`.
 5. `make_outbox(require_durable=True)` selects the SQLite implementation for
    `SQLiteDB` and continues refusing the in-memory implementation.
 6. Existing Postgres behavior and explicit test/dev memory-outbox selection do
