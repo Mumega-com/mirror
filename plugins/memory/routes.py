@@ -114,6 +114,7 @@ async def search_memory(
                 embedding=query_embedding,
                 threshold=request.threshold,
                 limit=internal_limit,
+                workspace_id=workspace_id,
                 owner_type="project",
                 owner_id=x_project_context,
                 tier_access=tier_access,

@@ -208,6 +208,51 @@ def test_x_project_context_overrides_project_filter(
     )
 
 
+def test_x_project_context_cannot_read_other_workspace_same_project_id(
+    db: SQLiteDB,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """P0: identical owner_id across tenants must not leak via X-Project-Context."""
+    keys_path = tmp_path / "tenant_keys.json"
+    keys_path.write_text(json.dumps([
+        {"key": "sk-tenant-a", "agent_slug": "agent-a", "workspace_id": "ws-a", "active": True},
+        {"key": "sk-tenant-b", "agent_slug": "agent-b", "workspace_id": "ws-b", "active": True},
+    ]))
+    monkeypatch.setenv("MIRROR_TENANT_KEYS_PATH", str(keys_path))
+
+    for ctx, ws in (("proj-a-only", "ws-a"), ("proj-b-only", "ws-b")):
+        db.upsert_engram({
+            "context_id": ctx,
+            "series": "shared-project-slug",
+            "workspace_id": ws,
+            "owner_type": "project",
+            "owner_id": "proj-shared",
+            "importance_score": 1.0,
+            "memory_tier": "episodic",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "raw_data": {"text": "shared project context"},
+            "embedding": _VEC_HIGH,
+        })
+
+    import plugins.memory.routes as _routes
+    monkeypatch.setattr(_routes, "_get_db", lambda: db)
+    monkeypatch.setattr(_routes, "_get_embedding_http", lambda text: _VEC_HIGH)
+
+    r = _client.post(
+        "/search",
+        json={"query": "shared project context", "top_k": 10, "threshold": 0.0},
+        headers={
+            "Authorization": "Bearer sk-tenant-a",
+            "X-Project-Context": "proj-shared",
+        },
+    )
+    assert r.status_code == 200, r.text
+    ids = [e["context_id"] for e in r.json()]
+    assert "proj-a-only" in ids
+    assert "proj-b-only" not in ids
+
+
 # ---------------------------------------------------------------------------
 # LocalDB.search_bm25 — importance_score filter (SQL inspection, no PG needed)
 # ---------------------------------------------------------------------------
