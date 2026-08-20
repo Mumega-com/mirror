@@ -377,6 +377,7 @@ class LocalDB:
         query: str,
         limit: int,
         workspace_id: Optional[str] = None,
+        project: Optional[str] = None,
     ) -> list[dict]:
         """Full-text BM25 search using tsvector column on raw_data->>'text'."""
         sql = """
@@ -390,6 +391,9 @@ class LocalDB:
         if workspace_id:
             sql += " AND workspace_id = %s"
             params.append(workspace_id)
+        if project:
+            sql += " AND project = %s"
+            params.append(project)
         sql += " ORDER BY bm25_rank DESC LIMIT %s"
         params.append(limit)
         with self._conn() as conn:

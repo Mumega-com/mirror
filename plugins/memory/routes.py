@@ -106,6 +106,7 @@ async def search_memory(
             query=request.query,
             limit=internal_limit,
             workspace_id=workspace_id,
+            project=request.project if ctx.is_admin else None,
         ) if hasattr(db, "search_bm25") else []
 
         blended = _rrf_blend(vector_rows, bm25_rows)

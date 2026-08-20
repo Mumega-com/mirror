@@ -73,6 +73,19 @@ def test_search_request_rejects_out_of_range_top_k():
     assert ok.top_k == 5
 
 
+def test_search_bm25_sql_filters_project_when_provided():
+    import inspect
+    from kernel.db import LocalDB
+    from plugins.memory import routes as mem_routes
+
+    source = inspect.getsource(LocalDB.search_bm25)
+    assert "project: Optional[str] = None" in source
+    assert "AND project = %s" in source
+    route_src = inspect.getsource(mem_routes.search_memory)
+    assert "project=request.project if ctx.is_admin else None" in route_src
+    assert "search_bm25(" in route_src
+
+
 def test_search_bm25_sql_aliases_timestamp_column():
     import inspect
     from kernel.db import LocalDB
