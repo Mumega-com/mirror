@@ -382,7 +382,7 @@ class LocalDB:
         sql = """
             SELECT id, context_id, series, project, workspace_id,
                    raw_data, epistemic_truths, core_concepts, affective_vibe,
-                   ts, ts_rank_cd(text_tsv, plainto_tsquery('english', %s)) AS bm25_rank
+                   timestamp AS ts, ts_rank_cd(text_tsv, plainto_tsquery('english', %s)) AS bm25_rank
             FROM mirror_engrams
             WHERE text_tsv @@ plainto_tsquery('english', %s)
         """

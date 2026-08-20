@@ -73,6 +73,17 @@ def test_search_request_rejects_out_of_range_top_k():
     assert ok.top_k == 5
 
 
+def test_search_bm25_sql_aliases_timestamp_column():
+    import inspect
+    from kernel.db import LocalDB
+
+    source = inspect.getsource(LocalDB.search_bm25)
+    assert "timestamp AS ts" in source
+    assert "\n                   ts," not in source
+    schema = open(os.path.join(os.path.dirname(__file__), "..", "schema.sql")).read()
+    assert "timestamp TIMESTAMPTZ" in schema
+
+
 def test_rrf_blend_ranks_docs_in_both_lists_higher():
     vector = [{"id": "a"}, {"id": "b"}]
     bm25 = [{"id": "b"}, {"id": "c"}]
