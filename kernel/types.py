@@ -4,15 +4,22 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Union
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
 
 
 class SearchRequest(BaseModel):
-    query: str
-    top_k: int = 5
+    query: str = Field(..., min_length=1)
+    top_k: int = Field(default=5, ge=1, le=50)
     agent_filter: Optional[str] = None  # Filter by agent: "river", "knight", "oracle"
     project: Optional[str] = None  # Filter by project slug: "gaf", "mirror", "torivers"
     threshold: float = 0.5
+
+    @validator("query")
+    def query_must_be_nonempty(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("query must be nonempty")
+        return stripped
 
 
 class EngramStoreRequest(BaseModel):

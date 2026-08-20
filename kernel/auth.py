@@ -8,6 +8,7 @@ This is the single source of truth for all auth decisions in Mirror.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -18,7 +19,6 @@ from fastapi import HTTPException
 
 logger = logging.getLogger("mirror.auth")
 
-_FALLBACK_ADMIN_TOKEN = "sk-mumega-internal-001"
 _FALLBACK_TENANT_KEYS_PATH = "/home/mumega/mirror/tenant_keys.json"
 
 
@@ -78,7 +78,7 @@ def resolve_token_context(
         tenant_keys_path: Override for testing.
     """
     if admin_token is None:
-        admin_token = os.getenv("MIRROR_ADMIN_TOKEN", _FALLBACK_ADMIN_TOKEN)
+        admin_token = os.getenv("MIRROR_ADMIN_TOKEN", "")
     if tenant_keys_path is None:
         tenant_keys_path = os.getenv("MIRROR_TENANT_KEYS_PATH", _FALLBACK_TENANT_KEYS_PATH)
 
@@ -86,8 +86,8 @@ def resolve_token_context(
     if not token:
         raise HTTPException(status_code=401, detail="Authorization required")
 
-    # 1. Admin
-    if token == admin_token:
+    # 1. Admin — no hardcoded fallback. Empty env must not match any bearer.
+    if admin_token and hmac.compare_digest(token, admin_token):
         return TokenContext(workspace_id=None, owner_type=None, owner_id=None, is_admin=True)
 
     # 2. Tenant keys

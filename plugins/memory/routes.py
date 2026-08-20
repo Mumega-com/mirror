@@ -77,6 +77,10 @@ async def search_memory(
     ctx: TokenContext = Depends(_resolve_token),
 ) -> List[EngramResponse]:
     """Semantic search across engrams, hard-scoped by workspace_id."""
+    if not request.query or not request.query.strip():
+        raise HTTPException(status_code=422, detail="query must be nonempty")
+    if request.top_k < 1 or request.top_k > 50:
+        raise HTTPException(status_code=422, detail="top_k must be between 1 and 50")
     try:
         # Non-admin tokens are locked to their workspace
         workspace_id = None if ctx.is_admin else ctx.workspace_id

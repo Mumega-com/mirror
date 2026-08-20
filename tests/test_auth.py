@@ -42,6 +42,18 @@ def test_token_context_admin_has_no_workspace():
 # Admin token
 # ---------------------------------------------------------------------------
 
+def test_legacy_hardcoded_admin_token_is_not_env_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("MIRROR_ADMIN_TOKEN", raising=False)
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_token_context(
+            f"Bearer {ADMIN_TOKEN}",
+            tenant_keys_path=str(tmp_path / "empty.json"),
+        )
+    assert exc_info.value.status_code == 401
+
+
 def test_admin_token_returns_admin_context(tmp_path):
     ctx = resolve_token_context(
         f"Bearer {ADMIN_TOKEN}",
