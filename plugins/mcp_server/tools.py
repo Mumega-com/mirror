@@ -9,6 +9,15 @@ from kernel.db import get_db
 from kernel.embeddings import get_embedding
 from kernel.outbox import is_outbox_enabled, make_outbox
 from kernel.receipts import build_mirror_engram_write_receipt, emit_mirror_engram_write_receipt
+from kernel.scoped_memory import (
+    ScopeDenied,
+    accept_projection,
+    lookup_engram,
+    scoped_count,
+    scoped_recent,
+    scoped_search,
+    token_has_project_scope,
+)
 from kernel.search import hybrid_search
 
 # ---------------------------------------------------------------------------
@@ -43,6 +52,17 @@ TOOLS = [
                 "affective_vibe":  {"type": "string", "default": "Neutral"},
             },
             "required": ["context_id", "text"],
+        },
+    },
+    {
+        "name": "memory_lookup",
+        "description": "Direct lookup of one engram in the caller's project. Hidden projects are not found.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "context_id": {"type": "string"},
+            },
+            "required": ["context_id"],
         },
     },
     {
@@ -124,6 +144,21 @@ def call_tool(name: str, arguments: dict, ctx: TokenContext) -> dict:
     workspace_id = None if ctx.is_admin else ctx.workspace_id
 
     if name == "memory_search":
+        if token_has_project_scope(ctx):
+            try:
+                rows = scoped_search(db, ctx, arguments["query"], limit=int(arguments.get("top_k", 5)))
+            except ScopeDenied as denied:
+                return _content({"error": denied.code, "results": None, "count": 0})
+            return _content([
+                {
+                    "context_id": r.get("context_id"),
+                    "text": r.get("text") or "",
+                    "title": r.get("title") or "",
+                    "synthesized": bool(r.get("synthesized", False)),
+                    "approved": False,
+                }
+                for r in rows
+            ])
         query = arguments["query"]
         top_k = int(arguments.get("top_k", 5))
         threshold = float(arguments.get("threshold", 0.6))
@@ -140,7 +175,42 @@ def call_tool(name: str, arguments: dict, ctx: TokenContext) -> dict:
         ]
         return _content(results)
 
+    elif name == "memory_lookup":
+        if not token_has_project_scope(ctx):
+            return _content({"error": "not_found"})
+        try:
+            row = lookup_engram(db, ctx, str(arguments.get("context_id") or ""))
+        except ScopeDenied as denied:
+            return _content({"error": denied.code})
+        if row is None:
+            return _content({"error": "not_found"})
+        return _content({
+            "context_id": row.get("context_id"),
+            "text": row.get("text") or "",
+            "title": row.get("title") or "",
+            "synthesized": bool(row.get("synthesized", False)),
+            "approved": False,
+        })
+
     elif name == "memory_store":
+        if token_has_project_scope(ctx):
+            try:
+                stored = accept_projection(db, ctx, {
+                    "slug": arguments.get("context_id"),
+                    "text": arguments.get("text"),
+                    "revision": arguments.get("revision") or 1,
+                    "visibility": arguments.get("visibility") or "public",
+                    "title": arguments.get("title") or "",
+                    "project": arguments.get("project"),
+                    "agent": arguments.get("agent"),
+                    "tenant": arguments.get("tenant"),
+                    "approved": arguments.get("approved"),
+                    "idempotency_key": arguments.get("idempotency_key"),
+                    "content_hash": arguments.get("content_hash"),
+                })
+            except ScopeDenied as denied:
+                return _content({"error": denied.code, "stored": False, "approved": False})
+            return _content(stored)
         from datetime import datetime, timezone
         import uuid
         context_id = arguments.get("context_id") or str(uuid.uuid4())
@@ -186,6 +256,25 @@ def call_tool(name: str, arguments: dict, ctx: TokenContext) -> dict:
         })
 
     elif name == "memory_recent":
+        if token_has_project_scope(ctx):
+            try:
+                rows = scoped_recent(db, ctx, limit=int(arguments.get("limit", 10)))
+                count = scoped_count(db, ctx)
+            except ScopeDenied as denied:
+                return _content({"error": denied.code, "engrams": [], "count": 0})
+            return _content({
+                "count": count,
+                "engrams": [
+                    {
+                        "context_id": r.get("context_id"),
+                        "text": r.get("text") or "",
+                        "title": r.get("title") or "",
+                        "synthesized": bool(r.get("synthesized", False)),
+                        "approved": False,
+                    }
+                    for r in rows
+                ],
+            })
         agent = arguments.get("agent", ctx.owner_id or "mcp-client")
         limit = int(arguments.get("limit", 10))
         rows = db.recent_engrams(agent, limit=limit, workspace_id=workspace_id)

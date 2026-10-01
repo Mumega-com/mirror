@@ -45,6 +45,8 @@ class TokenContext:
         tier_access:   Tiers this caller can read. Default: ['public', 'project'].
         entity_id:     Entity identifier for entity-scoped engrams (matches engram.entity_id).
         role:          Caller's role — 'coordinator' grants tier promotion rights.
+        project_id:    Trusted project binding. Never taken from a request body.
+        principal_id:  Trusted principal. Never taken from a caller-supplied agent name.
     """
 
     workspace_id: Optional[str]
@@ -54,6 +56,8 @@ class TokenContext:
     tier_access: list[str] = field(default_factory=lambda: ["public", "project"])
     entity_id: Optional[str] = field(default=None)
     role: Optional[str] = field(default=None)
+    project_id: Optional[str] = field(default=None)
+    principal_id: Optional[str] = field(default=None)
 
 
 def _load_tenant_keys(path: str) -> dict[str, dict]:
@@ -150,6 +154,8 @@ def resolve_token_context(
                     tier_access=_tier_access,
                     entity_id=_entity_id,
                     role=row.get("role"),
+                    project_id=row.get("project_id"),
+                    principal_id=row.get("principal_id") or row.get("owner_id") or row.get("label"),
                 )
     except Exception as _exc:
         logger.warning("DB token lookup failed: %s", _exc)
@@ -171,6 +177,8 @@ def resolve_token_context(
             tier_access=_tier_access,
             entity_id=_entity_id,
             role=_role,
+            project_id=entry.get("project_id"),
+            principal_id=entry.get("principal_id") or slug,
         )
 
     raise HTTPException(status_code=401, detail="Invalid token")

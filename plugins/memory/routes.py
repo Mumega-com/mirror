@@ -20,6 +20,15 @@ from kernel.db import get_db
 from kernel.embeddings import get_embedding as _get_embedding
 from kernel.outbox import is_outbox_enabled, make_outbox
 from kernel.receipts import build_mirror_engram_write_receipt, emit_mirror_engram_write_receipt
+from kernel.scoped_memory import (
+    ScopeDenied,
+    accept_projection,
+    lookup_engram,
+    scoped_count,
+    scoped_recent,
+    scoped_search,
+    token_has_project_scope,
+)
 from kernel.search import hybrid_search, rrf_blend
 from kernel.types import EngramResponse, EngramStoreRequest, SearchRequest
 
@@ -78,6 +87,15 @@ async def search_memory(
 ) -> List[EngramResponse]:
     """Semantic search across engrams, hard-scoped by workspace_id and tier RBAC."""
     try:
+        if token_has_project_scope(ctx):
+            # Project binding on the token wins. The header and body cannot
+            # switch the caller into another project.
+            try:
+                blended = scoped_search(_get_db(), ctx, request.query, limit=request.top_k)
+            except ScopeDenied as denied:
+                raise HTTPException(status_code=403, detail=denied.code) from denied
+            return [_engram_response(row) for row in blended[: request.top_k]]
+
         # Non-admin tokens are locked to their workspace
         workspace_id = None if ctx.is_admin else ctx.workspace_id
 
@@ -215,6 +233,29 @@ async def store_engram(
 ):
     """Store new engram, tagged with caller's workspace_id."""
     try:
+        if token_has_project_scope(ctx):
+            metadata = request.metadata or {}
+            try:
+                return accept_projection(
+                    _get_db(),
+                    ctx,
+                    {
+                        "slug": request.context_id,
+                        "text": request.text,
+                        "revision": metadata.get("revision") or 1,
+                        "visibility": metadata.get("visibility") or "public",
+                        "title": metadata.get("title") or "",
+                        "content_hash": metadata.get("content_hash"),
+                        "idempotency_key": metadata.get("idempotency_key"),
+                        "project": request.project,
+                        "agent": request.agent,
+                        "tenant": metadata.get("tenant"),
+                        "approved": metadata.get("approved"),
+                    },
+                )
+            except ScopeDenied as denied:
+                raise HTTPException(status_code=403, detail=denied.code) from denied
+
         # Determine effective workspace and agent from token
         if ctx.is_admin:
             workspace_id = None
@@ -348,6 +389,19 @@ async def get_recent_engrams(
 ):
     """Get recent engrams, scoped to caller's workspace."""
     try:
+        if token_has_project_scope(ctx):
+            try:
+                engrams = scoped_recent(_get_db(), ctx, limit=limit)
+            except ScopeDenied as denied:
+                raise HTTPException(status_code=403, detail=denied.code) from denied
+            return {
+                "agent": ctx.principal_id or ctx.owner_id,
+                "workspace_id": ctx.workspace_id,
+                "project": ctx.project_id,
+                "count": len(engrams),
+                "engrams": engrams,
+            }
+
         workspace_id = None if ctx.is_admin else ctx.workspace_id
         effective_agent = agent if ctx.is_admin else (ctx.owner_id or agent)
 
@@ -406,11 +460,17 @@ async def get_stats(ctx: TokenContext = Depends(_resolve_token)):
             # Non-admin callers get a count scoped to their own workspace only.
             # count_engrams_in_workspace ensures internal-agents is never counted
             # for customer tokens (and customers never count each other's engrams).
-            count = (
-                db.count_engrams_in_workspace(ctx.workspace_id)
-                if hasattr(db, "count_engrams_in_workspace")
-                else db.count_engrams()
-            )
+            if token_has_project_scope(ctx):
+                try:
+                    count = scoped_count(db, ctx)
+                except ScopeDenied as denied:
+                    raise HTTPException(status_code=403, detail=denied.code) from denied
+            else:
+                count = (
+                    db.count_engrams_in_workspace(ctx.workspace_id)
+                    if hasattr(db, "count_engrams_in_workspace")
+                    else db.count_engrams()
+                )
             return {
                 "workspace_id": ctx.workspace_id,
                 "total_engrams": count,
@@ -418,6 +478,51 @@ async def get_stats(ctx: TokenContext = Depends(_resolve_token)):
     except Exception as e:
         logger.error("Stats error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _engram_response(row: dict) -> EngramResponse:
+    raw_data = row.get("raw_data") or {}
+    text = raw_data.get("text", "") if isinstance(raw_data, dict) else row.get("text", "")
+    source_ids_raw = row.get("source_engram_ids") or []
+    if isinstance(source_ids_raw, str):
+        try:
+            source_ids_raw = json.loads(source_ids_raw)
+        except Exception:
+            source_ids_raw = []
+    return EngramResponse(
+        id=str(row.get("id") or ""),
+        context_id=str(row.get("context_id") or ""),
+        series=row.get("series") or "",
+        project=row.get("project"),
+        similarity=row.get("similarity"),
+        epistemic_truths=row.get("epistemic_truths") or [],
+        core_concepts=row.get("core_concepts") or [],
+        affective_vibe=row.get("affective_vibe"),
+        timestamp=row.get("timestamp") or "",
+        text=text or row.get("text") or "",
+        tier=row.get("tier") or "project",
+        entity_id=row.get("entity_id"),
+        memory_tier=row.get("memory_tier"),
+        synthesized=bool(row.get("synthesized", False)),
+        source_engram_ids=source_ids_raw,
+    )
+
+
+@router.get("/lookup/{logical_id}")
+async def lookup_memory(
+    logical_id: str,
+    ctx: TokenContext = Depends(_resolve_token),
+):
+    """Direct lookup. Another project's row is not_found, with no title leak."""
+    if not token_has_project_scope(ctx):
+        raise HTTPException(status_code=404, detail="not_found")
+    try:
+        row = lookup_engram(_get_db(), ctx, logical_id)
+    except ScopeDenied as denied:
+        raise HTTPException(status_code=403, detail=denied.code) from denied
+    if row is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    return _engram_response(row)
 
 
 # ---------------------------------------------------------------------------
