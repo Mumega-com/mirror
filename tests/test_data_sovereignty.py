@@ -80,7 +80,7 @@ def test_internal_agents_can_be_configured_from_env():
 def test_internal_agents_does_not_include_customer_slugs():
     """Customer slug must not be in the internal set."""
     assert "acme" not in INTERNAL_AGENTS
-    assert "viamar" not in INTERNAL_AGENTS
+    assert "tenant-beta" not in INTERNAL_AGENTS
     assert "beta-corp" not in INTERNAL_AGENTS
 
 
