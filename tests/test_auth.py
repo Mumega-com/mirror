@@ -70,23 +70,23 @@ def test_admin_token_has_no_builtin_default(monkeypatch, tmp_path):
 def test_tenant_token_returns_scoped_context():
     key = "sk-tenant-abc123"
     path = _make_tenant_file([
-        {"key": key, "agent_slug": "viamar", "active": True}
+        {"key": key, "agent_slug": "tenant-beta", "active": True}
     ])
     ctx = resolve_token_context(
         f"Bearer {key}",
         admin_token=ADMIN_TOKEN,
         tenant_keys_path=path,
     )
-    assert ctx.workspace_id == "viamar"
+    assert ctx.workspace_id == "tenant-beta"
     assert ctx.owner_type == "agent"
-    assert ctx.owner_id == "viamar"
+    assert ctx.owner_id == "tenant-beta"
     assert ctx.is_admin is False
 
 
 def test_inactive_tenant_key_raises_401():
     key = "sk-tenant-inactive"
     path = _make_tenant_file([
-        {"key": key, "agent_slug": "viamar", "active": False}
+        {"key": key, "agent_slug": "tenant-beta", "active": False}
     ])
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as exc_info:
@@ -128,7 +128,7 @@ def test_tenant_key_with_explicit_workspace():
     key = "sk-tenant-ws"
     path = _make_tenant_file([{
         "key": key,
-        "agent_slug": "viamar",
+        "agent_slug": "tenant-beta",
         "workspace_id": "ws-custom-123",
         "active": True,
     }])
@@ -138,7 +138,7 @@ def test_tenant_key_with_explicit_workspace():
         tenant_keys_path=path,
     )
     assert ctx.workspace_id == "ws-custom-123"
-    assert ctx.owner_id == "viamar"
+    assert ctx.owner_id == "tenant-beta"
 
 
 def test_legacy_mirror_api_resolve_token_delegates_to_kernel_auth(monkeypatch):

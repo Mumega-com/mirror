@@ -11,7 +11,7 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = 5
     agent_filter: Optional[str] = None  # Filter by agent: "assistant", "executor", "researcher"
-    project: Optional[str] = None  # Filter by project slug: "gaf", "mirror", "toassistants"
+    project: Optional[str] = None  # Filter by project slug: "tenant-alpha", "mirror", "toassistants"
     threshold: float = 0.5
     scope: Optional[str] = None  # "session" | "principal" | "workspace" | "org"
 
